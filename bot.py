@@ -31,8 +31,46 @@ logging.basicConfig(
 WAITING_TOKEN = {}
 SPIN_ALL_STOP = {}
 EDIT_LOCKS = {}
-LAST_ACTION = {}  # uid -> timestamp
+LAST_ACTION = {}       # uid -> timestamp
 RATE_LIMIT_SEC = 0.5
+
+# DDoS protection
+_ACTION_HISTORY = {}    # uid -> [timestamps]
+_BURST_WINDOW = 5       # seconds
+_BURST_MAX = 10         # max actions in window
+_MUTED = {}             # uid -> until timestamp
+_GLOBAL_HISTORY = []    # [timestamps]
+_GLOBAL_MAX = 30        # max actions per second globally
+
+
+def _check_ratelimit(uid):
+    """Returns True if request should be allowed."""
+    now = time.time()
+
+    # Check mute
+    if uid in _MUTED and now < _MUTED[uid]:
+        return False
+    if uid in _MUTED and now >= _MUTED[uid]:
+        del _MUTED[uid]
+
+    # Per-user burst detection
+    timestamps = _ACTION_HISTORY.get(uid, [])
+    timestamps = [t for t in timestamps if now - t < _BURST_WINDOW]
+    if len(timestamps) >= _BURST_MAX:
+        _MUTED[uid] = now + 60
+        del _ACTION_HISTORY[uid]
+        logging.warning(f"User {uid} muted for 60s (burst)")
+        return False
+    timestamps.append(now)
+    _ACTION_HISTORY[uid] = timestamps
+
+    # Global rate limit
+    _GLOBAL_HISTORY.append(now)
+    _GLOBAL_HISTORY[:] = [t for t in _GLOBAL_HISTORY if now - t < 1]
+    if len(_GLOBAL_HISTORY) > _GLOBAL_MAX:
+        return False
+
+    return True
 
 
 def main_menu():
@@ -78,11 +116,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
-    # Always answer the callback so button doesn't hang
     try:
         await q.answer()
     except Exception:
         pass
+    if not _check_ratelimit(uid):
+        return
     now = time.time()
     if uid in LAST_ACTION and now - LAST_ACTION[uid] < RATE_LIMIT_SEC:
         return
@@ -224,8 +263,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1. Перейди по ссылке:\n"
             f"<code>{YANDEX_OAUTH_URL}</code>\n\n"
             "2. Залогинься Яндексом\n"
-            "3. Скопируй URL из адресной строки\n"
-            "4. Отправь его сюда целиком\n\n"
+            "3. Скопируй ссылку из адресной строки\n"
+            "4. Отправь её сюда целиком\n\n"
             "⏱ Токен живёт ~1 год",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔓 Открыть Яндекс", url=YANDEX_OAUTH_URL)],
@@ -332,7 +371,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "help":
         await q.edit_message_text(
             "📖 <b>Помощь</b>\n\n"
-            "🎡 <b>Крутить всё</b> — крутит все аккаунты одновременно\n"
             "➕ <b>Добавить</b> — добавить Яндекс-аккаунт\n"
             "📋 <b>Аккаунты</b> — список и удаление\n"
             "📊 <b>Статистика</b> — общая статистика\n\n"
@@ -340,14 +378,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1. Нажми «➕ Добавить»\n"
             f"2. Зайди по ссылке: {YANDEX_OAUTH_URL}\n"
             "3. Залогинься Яндексом\n"
-            "4. Скопируй URL из адресной строки\n"
-            "5. Отправь его сюда целиком",
+            "4. Скопируйте ссылку из адресной строки\n"
+            "5. Отправьте её сюда целиком",
             reply_markup=back_kb(), parse_mode="HTML",
         )
 
 
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    if not _check_ratelimit(uid):
+        return
     db.add_user(uid, update.effective_user.username or "", update.effective_user.first_name or "")
     WAITING_TOKEN[uid] = True
     try:
@@ -356,8 +396,8 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1. Перейди по ссылке:\n"
             f"<code>{YANDEX_OAUTH_URL}</code>\n\n"
             "2. Залогинься Яндексом\n"
-            "3. Скопируй URL из адресной строки\n"
-            "4. Отправь его сюда целиком",
+            "3. Скопируй ссылку  из адресной строки\n"
+            "4. Отправь её сюда целиком",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔓 Открыть Яндекс", url=YANDEX_OAUTH_URL)],
                 [InlineKeyboardButton("◀️ В меню", callback_data="menu")],
@@ -399,6 +439,8 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    if not _check_ratelimit(uid):
+        return
     now = time.time()
     if uid in LAST_ACTION and now - LAST_ACTION[uid] < RATE_LIMIT_SEC:
         return
@@ -425,7 +467,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     del WAITING_TOKEN[uid]
 
-    await update.message.reply_text("🔍 Проверяю токен...", parse_mode="HTML")
+    await update.message.reply_text("🔍 Проверяю удалось ли войти...", parse_mode="HTML")
 
     try:
         yandex_check = await asyncio.to_thread(edadeal.check_yandex_token, token)
