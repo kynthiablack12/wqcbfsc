@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edadeal Bot — Dashboard</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root { --bg:#0c0e14; --surface:#141820; --surface2:#1a1f2b; --border:#232936; --text:#e1e6ef; --text2:#8b95a8; --text3:#545d70; --blue:#4f8aff; --green:#34d399; --yellow:#fbbf24; --purple:#a78bfa; --pink:#f472b6; --red:#f87171; }
+body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',Roboto,sans-serif; display:flex; min-height:100vh; }
+.sidebar { width:220px; background:var(--surface); border-right:1px solid var(--border); padding:24px 14px; display:flex; flex-direction:column; position:sticky; top:0; height:100vh; }
+.logo { font-size:17px; font-weight:700; color:#fff; margin-bottom:28px; display:flex; align-items:center; gap:10px; }
+.logo .icon { width:30px; height:30px; background:linear-gradient(135deg,var(--blue),var(--purple)); border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:14px; }
+.nav { display:flex; flex-direction:column; gap:2px; flex:1; }
+.nav a { color:var(--text2); text-decoration:none; padding:9px 12px; border-radius:8px; font-size:13px; font-weight:500; display:flex; align-items:center; gap:9px; transition:.15s; }
+.nav a:hover { background:var(--surface2); color:var(--text); }
+.nav a.active { background:linear-gradient(135deg,var(--blue)12,transparent); color:var(--blue); }
+.main { flex:1; padding:24px 28px; max-width:1200px; }
+.header-bar { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; }
+.header-bar h1 { font-size:20px; font-weight:600; }
+.btn { padding:7px 14px; border-radius:8px; border:1px solid var(--border); background:var(--surface); color:var(--text); font-size:12px; font-weight:500; cursor:pointer; transition:.15s; display:inline-flex; align-items:center; gap:5px; }
+.btn:hover { background:var(--surface2); border-color:var(--text3); }
+.btn-primary { background:linear-gradient(135deg,var(--blue),#3b6fe0); border:none; color:#fff; }
+.btn-primary:hover { opacity:.9; }
+.stats { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-bottom:24px; }
+.stat-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px 18px; transition:.2s; position:relative; overflow:hidden; }
+.stat-card:hover { border-color:var(--text3); transform:translateY(-1px); }
+.stat-card .num { font-size:26px; font-weight:700; line-height:1.2; }
+.stat-card .label { font-size:11px; color:var(--text2); margin-top:3px; }
+.stat-card .change { font-size:10px; margin-top:5px; display:flex; align-items:center; gap:2px; }
+.stat-card .change.up { color:var(--green); }
+.stat-card .change.down { color:var(--red); }
+.stat-card .glow { position:absolute; top:-50%; right:-30%; width:80px; height:80px; border-radius:50%; opacity:.07; pointer-events:none; }
+.filters { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
+.filters input,.filters select { background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:7px 10px; color:var(--text); font-size:12px; outline:none; }
+.filters input:focus,.filters select:focus { border-color:var(--blue); }
+.filters input { width:180px; }
+.table-wrap { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; margin-bottom:24px; }
+.table-wrap table { width:100%; border-collapse:collapse; font-size:12px; }
+.table-wrap th { background:var(--surface2); color:var(--text2); font-weight:600; font-size:10px; text-transform:uppercase; letter-spacing:.4px; text-align:left; padding:10px 14px; border-bottom:1px solid var(--border); }
+.table-wrap td { padding:10px 14px; border-bottom:1px solid var(--border); vertical-align:middle; }
+.table-wrap tr:last-child td { border-bottom:0; }
+.table-wrap tr:hover td { background:rgba(79,138,255,.03); }
+.status-dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:5px; }
+.status-dot.on { background:var(--green); box-shadow:0 0 6px var(--green)44; }
+.status-dot.off { background:var(--text3); }
+.expand-btn { cursor:pointer; color:var(--text3); transition:transform .2s; font-size:11px; user-select:none; display:inline-block; width:16px; }
+.expand-btn.open { transform:rotate(90deg); }
+.sub-row { display:none; }
+.sub-row.open { display:table-row; }
+.sub-table td { padding:6px 14px 6px 42px; font-size:11px; border-bottom:1px solid var(--border); }
+.sub-table .masked { color:var(--text3); font-family:monospace; letter-spacing:2px; font-size:11px; }
+.sub-table .bal { color:var(--yellow); font-weight:600; }
+.sub-table .st { font-size:10px; }
+.sub-table .st.active { color:var(--green); }
+.sub-table .st.expired { color:var(--red); }
+.pagination { display:flex; justify-content:space-between; align-items:center; padding:10px 14px; border-top:1px solid var(--border); font-size:12px; color:var(--text2); }
+.pagination .pages { display:flex; gap:3px; }
+.pagination .pages span { width:26px; height:26px; display:flex; align-items:center; justify-content:center; border-radius:5px; cursor:pointer; font-size:12px; transition:.15s; }
+.pagination .pages span:hover { background:var(--surface2); }
+.pagination .pages span.active { background:var(--blue); color:#fff; }
+.bottom-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+.section-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+.section-header h2 { font-size:14px; font-weight:600; display:flex; align-items:center; gap:7px; }
+.log-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+.log-item { display:flex; align-items:center; gap:8px; padding:8px 14px; border-bottom:1px solid var(--border); font-size:12px; }
+.log-item:last-child { border-bottom:0; }
+.log-item .ltime { color:var(--text3); font-family:monospace; font-size:10px; min-width:60px; white-space:nowrap; }
+.log-item .lbadge { font-size:9px; font-weight:600; padding:2px 7px; border-radius:10px; white-space:nowrap; }
+.log-item .lbadge.spin { background:var(--yellow)15; color:var(--yellow); }
+.log-item .lbadge.bonus { background:var(--green)15; color:var(--green); }
+.log-item .lmsg { flex:1; color:var(--text2); }
+.log-item .lmsg b { color:var(--text); }
+.log-item .lmsg .m { color:var(--text3); font-family:monospace; letter-spacing:1px; }
+.leaderboard { list-style:none; }
+.leaderboard li { display:flex; align-items:center; padding:8px 14px; border-bottom:1px solid var(--border); gap:10px; font-size:12px; }
+.leaderboard li:last-child { border-bottom:0; }
+.leaderboard .pos { width:20px; height:20px; border-radius:5px; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; background:var(--surface2); color:var(--text2); }
+.leaderboard .pos.gold { background:var(--yellow)18; color:var(--yellow); }
+.leaderboard .pos.silver { background:#c0c0c018; color:#c0c0c0; }
+.leaderboard .pos.bronze { background:#cd7f3218; color:#cd7f32; }
+.leaderboard .lname { flex:1; color:var(--text); }
+.leaderboard .lscore { color:var(--yellow); font-weight:600; }
+.health-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:14px; }
+.health-item { display:flex; justify-content:space-between; align-items:center; font-size:12px; }
+.health-item .hl { color:var(--text2); }
+.health-item .hr { display:flex; align-items:center; gap:5px; }
+.health-item .hr .dot { width:5px; height:5px; border-radius:50%; }
+.health-item .hr .dot.green { background:var(--green); }
+.health-item .hr .dot.red { background:var(--red); }
+.health-item .hr .dot.yellow { background:var(--yellow); }
+.user-info .name { font-weight:500; }
+.user-info .sub { font-size:10px; color:var(--text3); font-family:monospace; }
+.loading { opacity:.4; pointer-events:none; }
+td .bal-val { color:var(--yellow); font-weight:600; }
+.empty { text-align:center; padding:30px; color:var(--text3); font-size:13px; }
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="logo"><div class="icon">🎡</div> Edadeal Bot</div>
+  <div class="nav">
+    <a href="/" class="active">📊 Дашборд</a>
+    <a href="#">👥 Пользователи</a>
+    <a href="#">📜 Логи</a>
+    <a href="#">📡 Система</a>
+  </div>
+  <div style="padding-top:12px;border-top:1px solid var(--border);margin-top:auto;font-size:11px;color:var(--text3)">
+    v1.0 · данные с БД
+  </div>
+</aside>
+
+<div class="main" id="app">
+  <div class="header-bar">
+    <h1>📊 Дашборд</h1>
+    <div class="actions">
+      <button class="btn" onclick="refresh()">🔄 Обновить</button>
+    </div>
+  </div>
+
+  <div class="stats" id="stats">
+    <div class="stat-card"><div class="glow"></div><div class="num" style="color:var(--blue)">—</div><div class="label">Пользователей</div></div>
+    <div class="stat-card"><div class="glow"></div><div class="num" style="color:var(--green)">—</div><div class="label">Всего аккаунтов</div></div>
+    <div class="stat-card"><div class="glow"></div><div class="num" style="color:var(--yellow)">—</div><div class="label">Активных аккаунтов</div></div>
+    <div class="stat-card"><div class="glow"></div><div class="num" style="color:var(--purple)">—</div><div class="label">Активных юзеров</div></div>
+    <div class="stat-card"><div class="glow"></div><div class="num" style="color:var(--pink)">— <span style="font-size:14px">💎</span></div><div class="label">Всего алмазов</div></div>
+  </div>
+
+  <div class="filters">
+    <input type="text" id="search" placeholder="🔍 Поиск по username или ID..." oninput="loadUsers()">
+    <select id="statusFilter" onchange="loadUsers()">
+      <option value="">Все статусы</option>
+      <option value="active">Только активные</option>
+    </select>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th style="width:16px"></th>
+        <th>Пользователь</th>
+        <th>Аккаунты</th>
+        <th>Актив</th>
+        <th>💎 Алмазы</th>
+        <th>🎡 Прокрутки</th>
+        <th>🏆 Бонусы</th>
+        <th>Последний раз</th>
+      </tr></thead>
+      <tbody id="usersBody"></tbody>
+    </table>
+    <div class="pagination">
+      <span id="paginationInfo">Загрузка...</span>
+      <div class="pages" id="paginationPages"></div>
+    </div>
+  </div>
+
+  <div class="bottom-grid">
+    <div>
+      <div class="section-header"><h2>📜 Активность</h2></div>
+      <div class="log-card" id="logList"><div class="empty">Загрузка...</div></div>
+    </div>
+    <div>
+      <div class="section-header"><h2>🏆 Топ юзеров</h2><span style="font-size:11px;color:var(--text2)">по алмазам</span></div>
+      <div class="log-card" id="topList"><div class="empty">Загрузка...</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+var currentPage = 1;
+var expandedUser = null;
+
+async function api(path) {
+  try {
+    var r = await fetch(path);
+    return await r.json();
+  } catch(e) { return null; }
+}
+
+async function loadStats() {
+  var d = await api('/api/stats');
+  if (!d) return;
+  var cards = document.querySelectorAll('#stats .stat-card .num');
+  if (cards.length >= 5) {
+    cards[0].innerHTML = d.users;
+    cards[1].innerHTML = d.total_accounts;
+    cards[2].innerHTML = d.active_accounts;
+    cards[3].innerHTML = d.active_users;
+    cards[4].innerHTML = d.total_balance.toLocaleString() + ' <span style="font-size:14px">💎</span>';
+  }
+}
+
+async function loadUsers() {
+  var search = document.getElementById('search').value;
+  var status = document.getElementById('statusFilter').value;
+  var d = await api('/api/users?search='+encodeURIComponent(search)+'&status='+status+'&page='+currentPage+'&limit=20');
+  if (!d) return;
+  var tbody = document.getElementById('usersBody');
+  tbody.innerHTML = '';
+  if (d.users.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">Нет пользователей</td></tr>';
+    document.getElementById('paginationInfo').textContent = '0 найдено';
+    document.getElementById('paginationPages').innerHTML = '';
+    return;
+  }
+  d.users.forEach(function(u) {
+    var tr = document.createElement('tr');
+    var activeDot = u.active_accounts > 0 ? 'on' : 'off';
+    var username = u.username ? '@' + u.username : 'ID: ' + u.id;
+    tr.innerHTML = '<td><span class="expand-btn" data-uid="'+u.id+'">▶</span></td>' +
+      '<td><div class="user-info"><span class="name"><span class="status-dot '+activeDot+'"></span>' +
+      username + '</span><span class="sub">ID: ' + u.id + ' · '+u.active_accounts+' активных</span></div></td>' +
+      '<td>'+u.accounts+'</td><td>'+u.active_accounts+'</td>' +
+      '<td class="bal-val">'+u.total_balance.toLocaleString()+'</td>' +
+      '<td>'+u.total_spins+'</td><td style="color:var(--green)">'+u.total_bonuses+'</td>' +
+      '<td style="font-size:11px;color:var(--text2)">'+(u.last_active||'—')+'</td>';
+    tbody.appendChild(tr);
+  });
+  document.getElementById('paginationInfo').textContent = 'Показано '+d.users.length+' из '+d.total;
+  var pp = document.getElementById('paginationPages');
+  pp.innerHTML = '';
+  for (var i = 1; i <= d.pages && i <= 10; i++) {
+    var s = document.createElement('span');
+    s.textContent = i;
+    if (i === currentPage) s.className = 'active';
+    s.onclick = function(p) { return function() { currentPage = p; loadUsers(); }; }(i);
+    pp.appendChild(s);
+  }
+}
+
+async function loadLog() {
+  var d = await api('/api/log?limit=15');
+  if (!d) return;
+  var el = document.getElementById('logList');
+  if (d.length === 0) { el.innerHTML = '<div class="empty">Нет записей</div>'; return; }
+  el.innerHTML = d.map(function(l) {
+    var badge = l.prize ? 'bonus' : 'spin';
+    var icon = l.prize ? '🎯' : '🎡';
+    var label = l.prize ? l.prize.substring(0,20) : 'spin';
+    return '<div class="log-item"><span class="ltime">'+l.time+'</span>' +
+      '<span class="lbadge '+badge+'">'+icon+'</span>' +
+      '<span class="lmsg"><b>ID:'+l.user_id+'</b> <span class="m">'+l.login_masked+'</span> — '+label+'</span></div>';
+  }).join('');
+}
+
+async function loadTop() {
+  var d = await api('/api/top');
+  if (!d) return;
+  var el = document.getElementById('topList');
+  if (d.length === 0) { el.innerHTML = '<div class="empty">Нет данных</div>'; return; }
+  var medals = ['gold','silver','bronze'];
+  var icons = ['🥇','🥈','🥉'];
+  el.innerHTML = '<ol class="leaderboard">' + d.map(function(u, i) {
+    var cls = i < 3 ? medals[i] : '';
+    var icon = i < 3 ? icons[i] : (i+1);
+    return '<li><span class="pos ' + cls + '">' + icon + '</span>' +
+      '<span class="lname">' + u.username + '</span>' +
+      '<span class="lscore">' + u.balance.toLocaleString() + ' 💎</span></li>';
+  }).join('') + '</ol>';
+}
+
+async function refresh() {
+  currentPage = 1;
+  await Promise.all([loadStats(), loadUsers(), loadLog(), loadTop()]);
+}
+
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.expand-btn');
+  if (!btn) return;
+  var uid = btn.dataset.uid;
+  var row = btn.closest('tr');
+  var next = row.nextElementSibling;
+  if (next && next.classList.contains('sub-row')) {
+    next.remove();
+    btn.classList.remove('open');
+    return;
+  }
+  btn.classList.add('open');
+  fetch('/api/users/'+uid+'/accounts').then(function(r) { return r.json(); }).then(function(accs) {
+    var tr = document.createElement('tr');
+    tr.className = 'sub-row open';
+    tr.innerHTML = '<td colspan="8" style="padding:0"><table style="width:100%">' +
+      accs.map(function(a) {
+        var stCls = a.status === 'active' ? 'active' : 'expired';
+        var stIcon = a.status === 'active' ? '✅' : '⛔';
+        return '<tr><td><span class="masked">'+a.login_masked+'</span></td>' +
+          '<td><span class="st '+stCls+'">'+stIcon+' '+a.status+'</span></td>' +
+          '<td class="bal">'+a.balance+' 💎</td>' +
+          '<td style="font-size:10px;color:var(--text2)">'+(a.last_spin||'—')+'</td></tr>';
+      }).join('') +
+      '</table></td>';
+    row.after(tr);
+  });
+});
+
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>
