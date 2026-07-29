@@ -1,7 +1,8 @@
+import os
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import uvicorn
 
@@ -161,5 +162,6 @@ def index():
 
 
 if __name__ == "__main__":
-    print("🌐 Dashboard: http://127.0.0.1:5050")
-    uvicorn.run(app, host="127.0.0.1", port=5050, log_level="info")
+    port = int(os.environ.get("PORT", 5050))
+    print(f"🌐 Dashboard: http://0.0.0.0:{port}")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
