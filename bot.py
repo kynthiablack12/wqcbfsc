@@ -503,14 +503,11 @@ def main():
     db.init_db()
     print("[DB] OK")
 
-    PROXY_URL = os.environ.get("TG_PROXY", "http://127.0.0.1:10809")
-
-    app = (
-        Application.builder()
-        .token(TG_BOT_TOKEN)
-        .proxy(PROXY_URL)
-        .build()
-    )
+    proxy_url = os.environ.get("TG_PROXY", "")
+    builder = Application.builder().token(TG_BOT_TOKEN)
+    if proxy_url:
+        builder = builder.proxy(proxy_url)
+    app = builder.build()
 
     async def post_init(application):
         print("[Bot] Started!")
