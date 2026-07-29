@@ -32,7 +32,7 @@ WAITING_TOKEN = {}
 SPIN_ALL_STOP = {}
 EDIT_LOCKS = {}
 LAST_ACTION = {}  # uid -> timestamp
-RATE_LIMIT_SEC = 2
+RATE_LIMIT_SEC = 0.5
 
 
 def main_menu():
