@@ -265,19 +265,19 @@ def get_all_users():
 def get_user_stats(user_id):
     conn = get_conn()
     total = conn.execute(
-        "SELECT COUNT(*) FROM accounts WHERE user_id=?", (user_id,)
-    ).fetchone()[0]
+        "SELECT COUNT(*) AS v FROM accounts WHERE user_id=?", (user_id,)
+    ).fetchone()["v"]
     active = conn.execute(
-        "SELECT COUNT(*) FROM accounts WHERE user_id=? AND status='active'", (user_id,)
-    ).fetchone()[0]
+        "SELECT COUNT(*) AS v FROM accounts WHERE user_id=? AND status='active'", (user_id,)
+    ).fetchone()["v"]
     spins = conn.execute(
-        "SELECT COUNT(*) FROM prizes p JOIN accounts a ON p.account_id = a.id WHERE a.user_id=?",
+        "SELECT COUNT(*) AS v FROM prizes p JOIN accounts a ON p.account_id = a.id WHERE a.user_id=?",
         (user_id,),
-    ).fetchone()[0]
+    ).fetchone()["v"]
     balance = conn.execute(
-        "SELECT COALESCE(SUM(last_balance),0) FROM accounts WHERE user_id=? AND status='active'",
+        "SELECT COALESCE(SUM(last_balance),0) AS v FROM accounts WHERE user_id=? AND status='active'",
         (user_id,),
-    ).fetchone()[0]
+    ).fetchone()["v"]
     return {
         "total_accounts": total,
         "active_accounts": active,
