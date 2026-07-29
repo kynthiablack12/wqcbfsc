@@ -78,14 +78,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
-    now = time.time()
-    if uid in LAST_ACTION and now - LAST_ACTION[uid] < RATE_LIMIT_SEC:
-        return
-    LAST_ACTION[uid] = now
+    # Always answer the callback so button doesn't hang
     try:
         await q.answer()
     except Exception:
         pass
+    now = time.time()
+    if uid in LAST_ACTION and now - LAST_ACTION[uid] < RATE_LIMIT_SEC:
+        return
+    LAST_ACTION[uid] = now
     data = q.data
 
     if data == "menu":
