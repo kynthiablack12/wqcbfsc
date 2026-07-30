@@ -83,6 +83,9 @@ def main_menu():
             InlineKeyboardButton("📊 Статистика", callback_data="stats"),
             InlineKeyboardButton("📖 Помощь", callback_data="help"),
         ],
+        [
+            InlineKeyboardButton("📅 Отметиться", callback_data="daily_checkin"),
+        ],
     ])
 
 
@@ -210,6 +213,43 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "spin_all_stop":
         SPIN_ALL_STOP[uid] = True
         await q.answer("Останавливаю...")
+
+    elif data == "daily_checkin":
+        accounts = db.get_user_accounts(uid)
+        active = [a for a in accounts if a["status"] == "active"]
+        if not active:
+            await q.edit_message_text(
+                "❌ Нет активных аккаунтов\nДобавь: /add",
+                reply_markup=back_kb(), parse_mode="HTML",
+            )
+            return
+
+        await q.answer("Отмечаюсь...")
+        msg = await q.edit_message_text(
+            "📅 <b>Отмечаюсь за сегодня...</b>", parse_mode="HTML",
+        )
+
+        ok = 0
+        fail = 0
+        for acc in active:
+            auth = await asyncio.to_thread(edadeal.authenticate, acc["yandex_token"])
+            if not auth["ok"]:
+                fail += 1
+                continue
+            result = await asyncio.to_thread(
+                edadeal.claim_500_plus_bonus, auth["jwt"], auth.get("duid"), auth.get("uid")
+            )
+            if result.get("ok"):
+                ok += 1
+            else:
+                fail += 1
+
+        await msg.edit_text(
+            f"📅 <b>Отметка завершена</b>\n\n"
+            f"✅ Отмечено: {ok}\n"
+            f"❌ Ошибок: {fail}",
+            reply_markup=main_menu(), parse_mode="HTML",
+        )
 
     elif data == "refresh_balances":
         accounts = db.get_user_accounts(uid)
@@ -506,8 +546,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         db.add_account(uid, token, login, duid, edadeal_uid)
 
-        await asyncio.to_thread(edadeal.claim_500_plus_bonus, auth["jwt"], duid, edadeal_uid)
-
         bonus_text = ""
         wb = await asyncio.to_thread(edadeal.claim_welcome_bonus, auth["jwt"], duid, edadeal_uid)
         if wb.get("claimed"):
@@ -563,6 +601,7 @@ def main():
 
     async def post_init(application):
         print("[Bot] Started!")
+        asyncio.create_task(sched.daily_checkin_loop())
 
     app.post_init = post_init
 

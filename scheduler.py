@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import database as db
@@ -8,6 +9,8 @@ import edadeal
 _spin_executor = ThreadPoolExecutor(max_workers=3)
 # Global semaphore — max 3 accounts spinning concurrently
 _spin_semaphore = asyncio.Semaphore(3)
+
+CHECKIN_INTERVAL = 12 * 60 * 60  # 12 hours = 2x/day
 
 
 async def to_thread(func, *args, timeout=25):
@@ -73,3 +76,30 @@ async def _spin_one(account, stop_flag, uid, send_message):
 
     db.update_account_spin(account["id"], 0)
     return {"login": login, "spins": spins}
+
+
+async def _checkin_one(account):
+    try:
+        auth = await to_thread(edadeal.authenticate, account["yandex_token"])
+        if not auth["ok"]:
+            db.update_account_status(account["id"], "expired")
+            return {"login": account["login"], "ok": False, "error": "auth failed"}
+        result = await to_thread(
+            edadeal.claim_500_plus_bonus, auth["jwt"], auth.get("duid"), auth.get("uid")
+        )
+        return {"login": account["login"], "ok": result.get("ok", False), "status": result.get("status")}
+    except Exception as e:
+        return {"login": account["login"], "ok": False, "error": str(e)}
+
+
+async def daily_checkin_loop():
+    logging.info("[daily_checkin] start")
+    while True:
+        accounts = db.get_all_active_accounts()
+        if accounts:
+            logging.info("[daily_checkin] processing %d accounts", len(accounts))
+            for acc in accounts:
+                result = await _checkin_one(acc)
+                log = f"[daily_checkin] {result['login']}: {'OK' if result.get('ok') else 'FAIL'} ({result.get('status') or result.get('error', '?')})"
+                logging.info(log)
+        await asyncio.sleep(CHECKIN_INTERVAL)
