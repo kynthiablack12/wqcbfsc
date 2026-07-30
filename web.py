@@ -301,6 +301,7 @@ def api_top():
 def api_broadcast(data: dict):
     text = data.get("text", "")
     mode = data.get("mode", "all")
+    photo = data.get("photo", "")  # URL or Telegram file_id
     if not TG_BOT_TOKEN:
         return {"ok": False, "error": "TG_BOT_TOKEN not set"}
     conn = db.get_conn()
@@ -312,11 +313,21 @@ def api_broadcast(data: dict):
     failed = 0
     for r in rows:
         try:
-            resp = requests.post(
-                f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
-                json={"chat_id": r["telegram_id"], "text": text, "parse_mode": "HTML"},
-                timeout=15,
-            )
+            if photo:
+                payload = {"chat_id": r["telegram_id"], "photo": photo, "parse_mode": "HTML"}
+                if text:
+                    payload["caption"] = text
+                resp = requests.post(
+                    f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto",
+                    json=payload,
+                    timeout=15,
+                )
+            else:
+                resp = requests.post(
+                    f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": r["telegram_id"], "text": text, "parse_mode": "HTML"},
+                    timeout=15,
+                )
             if resp.status_code == 200:
                 sent += 1
             else:
@@ -595,6 +606,8 @@ td .bal-val{color:var(--yellow);font-weight:700}
         <option value="all">Всем пользователям</option>
         <option value="active">Только активным</option>
       </select>
+      <label>Ссылка на изображение (необязательно)</label>
+      <input id="broadcastPhoto" type="text" placeholder="https://example.com/image.jpg или file_id..." style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--text);font-size:14px">
       <label>Текст сообщения (HTML)</label>
       <textarea id="broadcastText" placeholder="Напишите сообщение..." style="width:100%;min-height:140px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--text);font-size:14px;resize:vertical;font-family:inherit"></textarea>
       <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
@@ -889,7 +902,8 @@ async function loadCheckinChart() {
 async function sendBroadcast() {
   var text = document.getElementById('broadcastText').value.trim();
   var mode = document.getElementById('broadcastMode').value;
-  if (!text) { document.getElementById('broadcastStatus').textContent = '❌ Введите текст'; return; }
+  var photo = document.getElementById('broadcastPhoto').value.trim();
+  if (!text && !photo) { document.getElementById('broadcastStatus').textContent = '❌ Заполните текст или добавьте фото'; return; }
   document.getElementById('broadcastStatus').textContent = '⏳ Отправка...';
   var btn = document.querySelector('#page-broadcast .btn-primary');
   btn.disabled = true;
@@ -897,7 +911,7 @@ async function sendBroadcast() {
     var r = await fetch('/api/broadcast', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({text: text, mode: mode}),
+      body: JSON.stringify({text: text, mode: mode, photo: photo}),
     });
     var d = await r.json();
     var el = document.getElementById('broadcastResult');
