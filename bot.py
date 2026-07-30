@@ -101,6 +101,13 @@ def back_kb():
     ])
 
 
+def after_add_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Добавить ещё", callback_data="add_account")],
+        [InlineKeyboardButton("◀️ В меню", callback_data="menu")],
+    ])
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db.add_user(user.id, user.username or "", user.first_name or "")
@@ -530,7 +537,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 <code>{login}</code>\n"
             f"💎 Баланс: {balance}"
             f"{bonus_text}",
-            reply_markup=back_kb(), parse_mode="HTML",
+            reply_markup=after_add_kb(), parse_mode="HTML",
         )
     except Exception as e:
         logging.exception(f"message_handler error for uid {uid}")
