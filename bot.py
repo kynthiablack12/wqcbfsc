@@ -226,30 +226,57 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await q.answer("Отмечаюсь...")
         msg = await q.edit_message_text(
-            "📅 <b>Отмечаюсь за сегодня...</b>", parse_mode="HTML",
+            "📅 <b>Отмечаюсь за сегодня...</b>\n\n"
+            f"<i>Аккаунтов: {len(active)}</i>\n"
+            f"Обработано: 0 / {len(active)}",
+            parse_mode="HTML",
         )
 
-        ok = 0
-        fail = 0
-        for acc in active:
-            auth = await asyncio.to_thread(edadeal.authenticate, acc["yandex_token"])
-            if not auth["ok"]:
-                fail += 1
-                continue
-            result = await asyncio.to_thread(
-                edadeal.claim_500_plus_bonus, auth["jwt"], auth.get("duid"), auth.get("uid")
-            )
-            if result.get("ok"):
-                ok += 1
-            else:
-                fail += 1
+        async def do_checkin(chat_id, mid):
+            ok = 0
+            fail = 0
+            sem = asyncio.Semaphore(5)
+            async def process(acc):
+                nonlocal ok, fail
+                async with sem:
+                    auth = await asyncio.to_thread(edadeal.authenticate, acc["yandex_token"])
+                    if not auth["ok"]:
+                        fail += 1
+                        return
+                    result = await asyncio.to_thread(
+                        edadeal.claim_500_plus_bonus, auth["jwt"], auth.get("duid"), auth.get("uid")
+                    )
+                    if result.get("ok"):
+                        ok += 1
+                    else:
+                        fail += 1
+            tasks = [process(acc) for acc in active]
+            done = 0
+            for coro in asyncio.as_completed(tasks):
+                await coro
+                done += 1
+                if done % 5 == 0:
+                    try:
+                        await context.bot.edit_message_text(
+                            f"📅 <b>Отмечаюсь за сегодня...</b>\n\n"
+                            f"<i>Аккаунтов: {len(active)}</i>\n"
+                            f"Обработано: {done} / {len(active)}",
+                            chat_id=chat_id, message_id=mid, parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+            try:
+                await context.bot.edit_message_text(
+                    f"📅 <b>Отметка завершена</b>\n\n"
+                    f"✅ Отмечено: {ok}\n"
+                    f"❌ Ошибок: {fail}",
+                    chat_id=chat_id, message_id=mid,
+                    reply_markup=main_menu(), parse_mode="HTML",
+                )
+            except Exception:
+                pass
 
-        await msg.edit_text(
-            f"📅 <b>Отметка завершена</b>\n\n"
-            f"✅ Отмечено: {ok}\n"
-            f"❌ Ошибок: {fail}",
-            reply_markup=main_menu(), parse_mode="HTML",
-        )
+        asyncio.create_task(do_checkin(msg.chat_id, msg.message_id))
 
     elif data == "refresh_balances":
         accounts = db.get_user_accounts(uid)

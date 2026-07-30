@@ -94,12 +94,16 @@ async def _checkin_one(account):
 
 async def daily_checkin_loop():
     logging.info("[daily_checkin] start")
+    sem = asyncio.Semaphore(5)
     while True:
         accounts = db.get_all_active_accounts()
         if accounts:
             logging.info("[daily_checkin] processing %d accounts", len(accounts))
-            for acc in accounts:
-                result = await _checkin_one(acc)
-                log = f"[daily_checkin] {result['login']}: {'OK' if result.get('ok') else 'FAIL'} ({result.get('status') or result.get('error', '?')})"
-                logging.info(log)
+            async def checked(acc):
+                async with sem:
+                    result = await _checkin_one(acc)
+                    log = f"[daily_checkin] {result['login']}: {'OK' if result.get('ok') else 'FAIL'} ({result.get('status') or result.get('error', '?')})"
+                    logging.info(log)
+            tasks = [checked(acc) for acc in accounts]
+            await asyncio.gather(*tasks)
         await asyncio.sleep(CHECKIN_INTERVAL)
