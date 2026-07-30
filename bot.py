@@ -499,6 +499,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         db.add_account(uid, token, login, duid, edadeal_uid)
 
+        await asyncio.to_thread(edadeal.claim_500_plus_bonus, auth["jwt"], duid, edadeal_uid)
+
         bonus_text = ""
         wb = await asyncio.to_thread(edadeal.claim_welcome_bonus, auth["jwt"], duid, edadeal_uid)
         if wb.get("claimed"):
