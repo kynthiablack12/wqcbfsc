@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
-from fastapi import FastAPI, Form, Query
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 
@@ -160,7 +160,9 @@ def api_top():
 
 
 @app.post("/api/broadcast")
-def api_broadcast(text: str = Form(...), mode: str = Form("all")):
+def api_broadcast(data: dict):
+    text = data.get("text", "")
+    mode = data.get("mode", "all")
     if not TG_BOT_TOKEN:
         return {"ok": False, "error": "TG_BOT_TOKEN not set"}
 
@@ -479,7 +481,8 @@ async function sendBroadcast() {
     const r = await fetch('/api/broadcast', {
       method: 'POST',
       headers: {'Content-Type':'application/x-www-form-urlencoded'},
-      body: 'text=' + encodeURIComponent(text) + '&mode=' + encodeURIComponent(mode),
+      body: JSON.stringify({text, mode}),
+      headers: {'Content-Type':'application/json'},
     });
     const d = await r.json();
     if (d.ok) {
