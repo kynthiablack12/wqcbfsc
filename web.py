@@ -1,7 +1,7 @@
 import json
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -31,12 +31,23 @@ def add_log(user_id, action, detail=""):
             _log_buffer[:] = _log_buffer[:200]
 
 
+def _last_active_sql():
+    return """(
+        SELECT MAX(ts) FROM (
+            SELECT a.last_spin AS ts FROM accounts a WHERE a.user_id=u.telegram_id AND a.last_spin IS NOT NULL
+            UNION ALL
+            SELECT p.spun_at FROM prizes p JOIN accounts a ON p.account_id=a.id WHERE a.user_id=u.telegram_id
+        )
+    )"""
+
+
 @app.get("/api/stats")
 def api_stats():
     conn = db.get_conn()
     users = conn.execute("SELECT COUNT(*) AS v FROM users").fetchone()["v"]
     total_accs = conn.execute("SELECT COUNT(*) AS v FROM accounts").fetchone()["v"]
     active_accs = conn.execute("SELECT COUNT(*) AS v FROM accounts WHERE status='active'").fetchone()["v"]
+    expired_accs = conn.execute("SELECT COUNT(*) AS v FROM accounts WHERE status='expired'").fetchone()["v"]
     active_users_rows = conn.execute("SELECT DISTINCT user_id AS v FROM accounts WHERE status='active'").fetchall()
     active_users = len(active_users_rows)
     total_balance = conn.execute("SELECT COALESCE(SUM(last_balance),0) AS v FROM accounts WHERE status='active'").fetchone()["v"]
@@ -45,17 +56,122 @@ def api_stats():
     today_str = datetime.now().strftime("%Y-%m-%d")
     today_users = conn.execute("SELECT COUNT(*) AS v FROM users WHERE created_at >= ?", (today_str,)).fetchone()["v"]
     today_accs = conn.execute("SELECT COUNT(*) AS v FROM accounts WHERE created_at >= ?", (today_str,)).fetchone()["v"]
+    today_checkins = conn.execute(
+        "SELECT COUNT(*) AS v FROM prizes WHERE spun_at >= ? AND prize_title!=''", (today_str,)
+    ).fetchone()["v"]
     return {
         "users": users,
         "total_accounts": total_accs,
         "active_accounts": active_accs,
+        "expired_accounts": expired_accs,
         "active_users": active_users,
         "total_balance": total_balance,
         "total_spins": total_spins,
         "total_bonuses": total_bonuses,
         "today_users": today_users,
         "today_accounts": today_accs,
+        "today_checkins": today_checkins,
     }
+
+
+@app.get("/api/stats/timeline")
+def api_stats_timeline(days: int = 30):
+    conn = db.get_conn()
+    dates = []
+    today = datetime.now().date()
+    for i in range(days - 1, -1, -1):
+        d = today - timedelta(days=i)
+        dates.append(d.strftime("%Y-%m-%d"))
+    users_data = []
+    accs_data = []
+    active_data = []
+    for d in dates:
+        nxt = (datetime.strptime(d, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        u = conn.execute("SELECT COUNT(*) AS v FROM users WHERE created_at >= ? AND created_at < ?",
+                         (d, nxt)).fetchone()["v"]
+        a = conn.execute("SELECT COUNT(*) AS v FROM accounts WHERE created_at >= ? AND created_at < ?",
+                         (d, nxt)).fetchone()["v"]
+        act = conn.execute(
+            "SELECT COUNT(DISTINCT a.id) AS v FROM accounts a JOIN prizes p ON p.account_id=a.id WHERE p.spun_at >= ? AND p.spun_at < ?",
+            (d, nxt)
+        ).fetchone()["v"]
+        users_data.append(u)
+        accs_data.append(a)
+        active_data.append(act)
+    return {"labels": dates, "users": users_data, "accounts": accs_data, "active": active_data}
+
+
+@app.get("/api/stats/daily")
+def api_stats_daily(days: int = 14):
+    conn = db.get_conn()
+    dates = []
+    today = datetime.now().date()
+    for i in range(days - 1, -1, -1):
+        d = today - timedelta(days=i)
+        dates.append(d.strftime("%Y-%m-%d"))
+    spins_data = []
+    checkins_data = []
+    for d in dates:
+        nxt = (datetime.strptime(d, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        s = conn.execute("SELECT COUNT(*) AS v FROM prizes WHERE spun_at >= ? AND spun_at < ?",
+                         (d, nxt)).fetchone()["v"]
+        c = conn.execute("SELECT COUNT(*) AS v FROM prizes WHERE spun_at >= ? AND spun_at < ? AND prize_title!=''",
+                         (d, nxt)).fetchone()["v"]
+        spins_data.append(s)
+        checkins_data.append(c)
+    return {"labels": dates, "spins": spins_data, "checkins": checkins_data}
+
+
+@app.get("/api/stats/balances")
+def api_stats_balances():
+    conn = db.get_conn()
+    buckets = {"0": 0, "1-1000": 0, "1001-5000": 0, "5001-10000": 0, "10001+": 0}
+    rows = conn.execute("SELECT last_balance FROM accounts WHERE status='active'").fetchall()
+    for r in rows:
+        b = r["last_balance"] or 0
+        if b == 0:
+            buckets["0"] += 1
+        elif b <= 1000:
+            buckets["1-1000"] += 1
+        elif b <= 5000:
+            buckets["1001-5000"] += 1
+        elif b <= 10000:
+            buckets["5001-10000"] += 1
+        else:
+            buckets["10001+"] += 1
+    return {"labels": list(buckets.keys()), "values": list(buckets.values())}
+
+
+@app.get("/api/stats/bonuses")
+def api_stats_bonuses():
+    conn = db.get_conn()
+    rows = conn.execute("SELECT prize_title FROM prizes WHERE prize_title!=''").fetchall()
+    counts = {}
+    for r in rows:
+        t = r["prize_title"][:40]
+        counts[t] = counts.get(t, 0) + 1
+    sorted_items = sorted(counts.items(), key=lambda x: -x[1])[:10]
+    return {"labels": [x[0] for x in sorted_items], "values": [x[1] for x in sorted_items]}
+
+
+@app.get("/api/stats/retention")
+def api_stats_retention(days: int = 30):
+    conn = db.get_conn()
+    dates = []
+    today = datetime.now().date()
+    for i in range(days - 1, -1, -1):
+        d = today - timedelta(days=i)
+        dates.append(d.strftime("%Y-%m-%d"))
+    created = []
+    active_now = []
+    for d in dates:
+        c = conn.execute("SELECT COUNT(*) AS v FROM accounts WHERE created_at <= ?", (d,)).fetchone()["v"]
+        a = conn.execute(
+            "SELECT COUNT(*) AS v FROM accounts WHERE status='active' AND created_at <= ?", (d,)
+        ).fetchone()["v"]
+        created.append(c)
+        active_now.append(a)
+    return {"labels": dates, "created": created, "active": active_now}
 
 
 @app.get("/api/users")
@@ -82,32 +198,37 @@ def api_users(search: str = "", status: str = "", page: int = 1, limit: int = 20
                (SELECT COALESCE(SUM(last_balance),0) FROM accounts WHERE user_id=u.telegram_id AND status='active') as total_balance,
                (SELECT COUNT(*) FROM prizes p JOIN accounts a ON p.account_id=a.id WHERE a.user_id=u.telegram_id) as total_spins,
                (SELECT COUNT(*) FROM prizes p JOIN accounts a ON p.account_id=a.id WHERE a.user_id=u.telegram_id AND p.prize_title!='') as total_bonuses,
-               (SELECT MAX(COALESCE(a.last_spin, a.created_at)) FROM accounts a WHERE a.user_id=u.telegram_id) as last_active
+               {_last_active_sql()} as last_active
         FROM users u
         WHERE {where_sql}
-        ORDER BY total_balance DESC
+        ORDER BY COALESCE((SELECT SUM(last_balance) FROM accounts WHERE user_id=u.telegram_id AND status='active'),0) DESC
         LIMIT ? OFFSET ?
     """, params + [limit, offset]).fetchall()
 
     users_list = []
     for r in rows:
-        last_active = r["last_active"]
-        if last_active:
+        last_active = ""
+        if r["last_active"]:
             try:
-                last_active = datetime.fromisoformat(last_active).strftime("%d.%m %H:%M")
+                last_active = datetime.fromisoformat(r["last_active"]).strftime("%d.%m %H:%M")
+            except Exception:
+                pass
+        if not last_active and r["created_at"]:
+            try:
+                last_active = "создан " + datetime.fromisoformat(r["created_at"]).strftime("%d.%m %H:%M")
             except Exception:
                 pass
         users_list.append({
             "id": r["telegram_id"],
             "username": r["username"] or "",
             "first_name": r["first_name"] or "",
-            "created_at": r["created_at"],
+            "created_at": r["created_at"] or "",
             "accounts": r["acc_count"],
             "active_accounts": r["active_count"],
             "total_balance": r["total_balance"],
             "total_spins": r["total_spins"],
             "total_bonuses": r["total_bonuses"],
-            "last_active": last_active or "",
+            "last_active": last_active,
         })
 
     return {"users": users_list, "total": total, "page": page, "pages": max(1, (total + limit - 1) // limit)}
@@ -126,13 +247,13 @@ def api_user_accounts(user_id: int):
         "login_masked": r["login"][:2] + "•••" + r["login"][-1:] if len(r["login"]) > 3 else "•••",
         "status": r["status"],
         "balance": r["last_balance"] or 0,
-        "last_spin": (datetime.fromisoformat(r["last_spin"]).strftime("%d.%m %H:%M") if r["last_spin"] else ""),
+        "last_spin": (datetime.fromisoformat(r["last_spin"]).strftime("%d.%m %H:%M") if r["last_spin"] else "—"),
         "created_at": (datetime.fromisoformat(r["created_at"]).strftime("%d.%m %H:%M") if r["created_at"] else ""),
     } for r in rows]
 
 
 @app.get("/api/log")
-def api_log(limit: int = 50):
+def api_log(limit: int = 30):
     conn = db.get_conn()
     rows = conn.execute("""
         SELECT p.spun_at as ts, a.login, a.user_id,
@@ -147,7 +268,7 @@ def api_log(limit: int = 50):
         "time": (datetime.fromisoformat(r["ts"]).strftime("%d.%m %H:%M") if r["ts"] else ""),
         "user_id": r["user_id"],
         "login_masked": r["login"][:2] + "•••" + r["login"][-1:] if len(r["login"]) > 3 else "•••",
-        "action": "spin",
+        "action": "spin" if r["action"] == "spin" else "🎁",
         "prize": r["action"] or "",
         "balance": r["balance_after"] or 0,
     } for r in rows]
@@ -159,7 +280,8 @@ def api_top():
     rows = conn.execute("""
         SELECT u.telegram_id, u.username,
                COALESCE((SELECT SUM(last_balance) FROM accounts WHERE user_id=u.telegram_id AND status='active'),0) as balance,
-               (SELECT COUNT(*) FROM accounts WHERE user_id=u.telegram_id AND status='active') as accounts
+               (SELECT COUNT(*) FROM accounts WHERE user_id=u.telegram_id AND status='active') as accounts,
+               (SELECT COUNT(*) FROM prizes p JOIN accounts a ON p.account_id=a.id WHERE a.user_id=u.telegram_id) as spins
         FROM users u
         GROUP BY u.telegram_id
         HAVING balance > 0
@@ -171,6 +293,7 @@ def api_top():
         "username": (r["username"] or f"ID:{r['telegram_id']}"),
         "balance": r["balance"],
         "accounts": r["accounts"],
+        "spins": r["spins"],
     } for r in rows]
 
 
@@ -216,193 +339,229 @@ HTML_PAGE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Edadeal Bot — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#0c0e14;--surface:#141820;--surface2:#1a1f2b;--border:#232936;--text:#e1e6ef;--text2:#8b95a8;--text3:#545d70;--blue:#4f8aff;--green:#34d399;--yellow:#fbbf24;--purple:#a78bfa;--pink:#f472b6;--red:#f87171}
-body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',Roboto,sans-serif;display:flex;min-height:100vh}
-.sidebar{width:220px;background:var(--surface);border-right:1px solid var(--border);padding:24px 14px;display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
-.logo{font-size:17px;font-weight:700;color:#fff;margin-bottom:28px;display:flex;align-items:center;gap:10px}
-.logo .icon{width:30px;height:30px;background:linear-gradient(135deg,var(--blue),var(--purple));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px}
-.nav{display:flex;flex-direction:column;gap:2px;flex:1}
-.nav a{color:var(--text2);text-decoration:none;padding:9px 12px;border-radius:8px;font-size:13px;font-weight:500;display:flex;align-items:center;gap:9px;transition:.15s;cursor:pointer}
-.nav a:hover{background:var(--surface2);color:var(--text)}
-.nav a.active{background:linear-gradient(135deg,var(--blue)12,transparent);color:var(--blue)}
-.main{flex:1;padding:24px 28px;max-width:1200px}
-.header-bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
-.header-bar h1{font-size:20px;font-weight:600}
-.btn{padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:12px;font-weight:500;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:5px}
-.btn:hover{background:var(--surface2);border-color:var(--text3)}
-.btn-primary{background:linear-gradient(135deg,var(--blue),#3b6fe0);border:none;color:#fff}
-.btn-primary:hover{opacity:.9}
-.page{display:none}
-.page.active{display:block}
-.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:24px}
-.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px;transition:.2s;position:relative;overflow:hidden}
-.stat-card:hover{border-color:var(--text3);transform:translateY(-1px)}
-.stat-card .num{font-size:26px;font-weight:700;line-height:1.2}
-.stat-card .label{font-size:11px;color:var(--text2);margin-top:3px}
-.stat-card .glow{position:absolute;top:-50%;right:-30%;width:80px;height:80px;border-radius:50%;opacity:.07;pointer-events:none}
-.filters{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
-.filters input,.filters select,.filters textarea{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:7px 10px;color:var(--text);font-size:12px;outline:none}
-.filters input:focus,.filters select:focus,.filters textarea:focus{border-color:var(--blue)}
-.filters input{width:180px}
-.filters textarea{width:100%;min-height:100px;resize:vertical;font-family:inherit}
-.table-wrap{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:24px}
-.table-wrap table{width:100%;border-collapse:collapse;font-size:12px}
-.table-wrap th{background:var(--surface2);color:var(--text2);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.4px;text-align:left;padding:10px 14px;border-bottom:1px solid var(--border)}
-.table-wrap td{padding:10px 14px;border-bottom:1px solid var(--border);vertical-align:middle}
+:root{--bg:#0b0d14;--surface:#151923;--surface2:#1b2030;--border:#232a3d;--text:#e4e9f2;--text2:#8d97af;--text3:#586077;--blue:#4f8aff;--green:#34d399;--yellow:#fbbf24;--purple:#a78bfa;--pink:#f472b6;--red:#f87171;--cyan:#22d3ee}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',Roboto,sans-serif;display:flex;min-height:100vh;font-size:16px;line-height:1.5}
+.sidebar{width:250px;background:var(--surface);border-right:1px solid var(--border);padding:30px 18px;display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
+.logo{font-size:21px;font-weight:700;color:#fff;margin-bottom:36px;display:flex;align-items:center;gap:14px}
+.logo .icon{width:38px;height:38px;background:linear-gradient(135deg,var(--blue),var(--purple));border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 0 20px rgba(79,138,255,.25)}
+.nav{display:flex;flex-direction:column;gap:4px;flex:1}
+.nav a{color:var(--text2);text-decoration:none;padding:13px 16px;border-radius:12px;font-size:15px;font-weight:500;display:flex;align-items:center;gap:12px;transition:all .25s cubic-bezier(.4,0,.2,1);cursor:pointer}
+.nav a:hover{background:var(--surface2);color:var(--text);transform:translateX(5px)}
+.nav a.active{background:linear-gradient(135deg,rgba(79,138,255,.15),transparent);color:var(--blue);border-left:3px solid var(--blue);border-radius:12px 8px 8px 12px;font-weight:600}
+.main{flex:1;padding:32px 36px;max-width:1280px;overflow-y:auto;max-height:100vh;width:0}
+.header-bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:32px;flex-wrap:wrap;gap:12px}
+.header-bar h1{font-size:28px;font-weight:700;letter-spacing:-.3px}
+.header-bar .sub{font-size:14px;color:var(--text3)}
+.btn{padding:10px 22px;border-radius:12px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:14px;font-weight:500;cursor:pointer;transition:all .25s;display:inline-flex;align-items:center;gap:8px;user-select:none}
+.btn:hover{background:var(--surface2);border-color:var(--text3);transform:translateY(-2px);box-shadow:0 4px 16px rgba(0,0,0,.3)}
+.btn:active{transform:translateY(0)}
+.btn-primary{background:linear-gradient(135deg,var(--blue),#3b6fe0);border:none;color:#fff;padding:10px 26px}
+.btn-primary:hover{opacity:.92;transform:translateY(-2px);box-shadow:0 4px 20px rgba(79,138,255,.3)}
+.page{display:none;opacity:0;transition:opacity .4s ease,transform .4s cubic-bezier(.4,0,.2,1);transform:translateY(15px)}
+.page.active{display:block;opacity:1;transform:translateY(0)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:32px}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px 26px;transition:all .35s cubic-bezier(.4,0,.2,1);position:relative;overflow:hidden;cursor:default}
+.stat-card:hover{border-color:rgba(255,255,255,.08);transform:translateY(-3px);box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.stat-card .num{font-size:32px;font-weight:800;line-height:1.15;letter-spacing:-.5px;transition:transform .3s}
+.stat-card:hover .num{transform:scale(1.04)}
+.stat-card .label{font-size:14px;color:var(--text2);margin-top:6px;font-weight:500}
+.stat-card .sub{font-size:12px;color:var(--text3);margin-top:3px}
+.stat-card .glow{position:absolute;top:-50%;right:-30%;width:120px;height:120px;border-radius:50%;opacity:.07;pointer-events:none;transition:opacity .5s}
+.stat-card:hover .glow{opacity:.14}
+.charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:32px}
+.chart-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;position:relative;transition:border-color .3s}
+.chart-card:hover{border-color:rgba(255,255,255,.06)}
+.chart-card h3{font-size:15px;color:var(--text2);margin-bottom:16px;font-weight:600;display:flex;align-items:center;gap:8px}
+.chart-card canvas{max-height:280px}
+.chart-card.full{grid-column:1/-1}
+.charts-grid .chart-card{animation:fadeSlide .5s ease both}
+.charts-grid .chart-card:nth-child(1){animation-delay:0s}
+.charts-grid .chart-card:nth-child(2){animation-delay:.12s}
+.charts-grid .chart-card:nth-child(3){animation-delay:.24s}
+.charts-grid .chart-card:nth-child(4){animation-delay:.36s}
+.filters{display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;align-items:center}
+.filters input,.filters select,.filters textarea{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--text);font-size:14px;outline:none;transition:border-color .25s,box-shadow .25s}
+.filters input:focus,.filters select:focus,.filters textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,138,255,.12)}
+.filters input{width:220px}
+.filters textarea{width:100%;min-height:140px;resize:vertical;font-family:inherit}
+.table-wrap{background:var(--surface);border:1px solid var(--border);border-radius:16px;overflow:hidden;margin-bottom:32px;animation:fadeSlide .45s ease}
+.table-wrap table{width:100%;border-collapse:collapse;font-size:14px}
+.table-wrap th{background:var(--surface2);color:var(--text2);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.6px;text-align:left;padding:14px 18px;border-bottom:1px solid var(--border)}
+.table-wrap td{padding:14px 18px;border-bottom:1px solid var(--border);vertical-align:middle}
 .table-wrap tr:last-child td{border-bottom:0}
-.table-wrap tr:hover td{background:rgba(79,138,255,.03)}
-.status-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:5px}
-.status-dot.on{background:var(--green);box-shadow:0 0 6px var(--green)44}
+.table-wrap tr{transition:background .15s}
+.table-wrap tbody tr:hover td{background:rgba(79,138,255,.04)}
+.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px;vertical-align:middle}
+.status-dot.on{background:var(--green);box-shadow:0 0 10px rgba(52,211,153,.5)}
 .status-dot.off{background:var(--text3)}
-.expand-btn{cursor:pointer;color:var(--text3);transition:transform .2s;font-size:11px;user-select:none;display:inline-block;width:16px}
-.expand-btn.open{transform:rotate(90deg)}
+.expand-btn{cursor:pointer;color:var(--text3);transition:transform .3s,color .2s;font-size:14px;user-select:none;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px}
+.expand-btn:hover{color:var(--blue)}
+.expand-btn.open{transform:rotate(90deg);color:var(--blue)}
 .sub-row{display:none}
-.sub-row.open{display:table-row}
-.sub-table td{padding:6px 14px 6px 42px;font-size:11px;border-bottom:1px solid var(--border)}
-.sub-table .masked{color:var(--text3);font-family:monospace;letter-spacing:2px;font-size:11px}
-.sub-table .bal{color:var(--yellow);font-weight:600}
-.sub-table .st{font-size:10px}
+.sub-row.open{display:table-row;animation:fadeSlide .3s ease}
+.sub-table td{padding:10px 18px 10px 56px;font-size:14px;border-bottom:1px solid var(--border)}
+.sub-table .masked{color:var(--text3);font-family:monospace;letter-spacing:2px;font-size:13px}
+.sub-table .bal{color:var(--yellow);font-weight:700}
+.sub-table .st{font-size:12px;font-weight:500}
 .sub-table .st.active{color:var(--green)}
 .sub-table .st.expired{color:var(--red)}
-.pagination{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-top:1px solid var(--border);font-size:12px;color:var(--text2)}
-.pagination .pages{display:flex;gap:3px}
-.pagination .pages span{width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:5px;cursor:pointer;font-size:12px;transition:.15s}
+.pagination{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-top:1px solid var(--border);font-size:14px;color:var(--text2)}
+.pagination .pages{display:flex;gap:4px}
+.pagination .pages span{width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:8px;cursor:pointer;font-size:14px;transition:all .2s}
 .pagination .pages span:hover{background:var(--surface2)}
 .pagination .pages span.active{background:var(--blue);color:#fff}
-.bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-.section-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
-.section-header h2{font-size:14px;font-weight:600;display:flex;align-items:center;gap:7px}
-.log-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden}
-.log-item{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border);font-size:12px}
+.log-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;overflow:hidden}
+.log-item{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--border);font-size:14px;transition:background .15s}
 .log-item:last-child{border-bottom:0}
-.log-item .ltime{color:var(--text3);font-family:monospace;font-size:10px;min-width:60px;white-space:nowrap}
-.log-item .lbadge{font-size:9px;font-weight:600;padding:2px 7px;border-radius:10px;white-space:nowrap}
-.log-item .lbadge.spin{background:var(--yellow)15;color:var(--yellow)}
-.log-item .lbadge.bonus{background:var(--green)15;color:var(--green)}
-.log-item .lbadge.broadcast{background:var(--blue)15;color:var(--blue)}
+.log-item:hover{background:var(--surface2)}
+.log-item .ltime{color:var(--text3);font-family:monospace;font-size:12px;min-width:80px;white-space:nowrap}
+.log-item .lbadge{font-size:11px;font-weight:600;padding:4px 10px;border-radius:14px;white-space:nowrap}
+.log-item .lbadge.spin{background:rgba(251,191,36,.12);color:var(--yellow)}
+.log-item .lbadge.bonus{background:rgba(52,211,153,.12);color:var(--green)}
+.log-item .lbadge.broadcast{background:rgba(79,138,255,.12);color:var(--blue)}
 .log-item .lmsg{flex:1;color:var(--text2)}
 .log-item .lmsg b{color:var(--text)}
-.log-item .lmsg .m{color:var(--text3);font-family:monospace;letter-spacing:1px}
 .leaderboard{list-style:none}
-.leaderboard li{display:flex;align-items:center;padding:8px 14px;border-bottom:1px solid var(--border);gap:10px;font-size:12px}
+.leaderboard li{display:flex;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);gap:12px;font-size:14px;transition:background .15s;animation:fadeSlide .35s ease both}
 .leaderboard li:last-child{border-bottom:0}
-.leaderboard .pos{width:20px;height:20px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;background:var(--surface2);color:var(--text2)}
-.leaderboard .pos.gold{background:var(--yellow)18;color:var(--yellow)}
-.leaderboard .pos.silver{background:#c0c0c018;color:#c0c0c0}
-.leaderboard .pos.bronze{background:#cd7f3218;color:#cd7f32}
-.leaderboard .lname{flex:1;color:var(--text)}
-.leaderboard .lscore{color:var(--yellow);font-weight:600}
-.broadcast-box{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:600px}
-.broadcast-box label{display:block;font-size:12px;color:var(--text2);margin-bottom:4px;margin-top:12px}
-.broadcast-box label:first-child{margin-top:0}
-.broadcast-result{margin-top:12px;padding:10px 14px;border-radius:8px;font-size:12px;display:none}
-.broadcast-result.ok{display:block;background:var(--green)12;color:var(--green);border:1px solid var(--green)22}
-.broadcast-result.fail{display:block;background:var(--red)12;color:var(--red);border:1px solid var(--red)22}
-.user-info .name{font-weight:500}
-.user-info .sub{font-size:10px;color:var(--text3);font-family:monospace}
-.loading{opacity:.4;pointer-events:none}
-td .bal-val{color:var(--yellow);font-weight:600}
-.empty{text-align:center;padding:30px;color:var(--text3);font-size:13px}
-
-/* Animations */
-@keyframes fadeSlide{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-@keyframes fadeIn{from{opacity:0}to{opacity:1}}
-@keyframes pulseGlow{0%,100%{opacity:.08}50%{opacity:.15}}
-@keyframes countUp{from{opacity:0;transform:scale(.7)}to{opacity:1;transform:scale(1)}}
-.stat-card{animation:fadeSlide .4s ease both}
-.stat-card:nth-child(1){animation-delay:0s}
-.stat-card:nth-child(2){animation-delay:.05s}
-.stat-card:nth-child(3){animation-delay:.1s}
-.stat-card:nth-child(4){animation-delay:.15s}
-.stat-card:nth-child(5){animation-delay:.2s}
-.table-wrap{animation:fadeIn .3s ease}
-.log-item{animation:fadeSlide .3s ease both}
-.log-item:nth-child(1){animation-delay:0s}
-.log-item:nth-child(2){animation-delay:.03s}
-.log-item:nth-child(3){animation-delay:.06s}
-.log-item:nth-child(4){animation-delay:.09s}
-.log-item:nth-child(5){animation-delay:.12s}
-.log-item:nth-child(6){animation-delay:.15s}
-.log-item:nth-child(7){animation-delay:.18s}
-.log-item:nth-child(8){animation-delay:.21s}
-.leaderboard li{animation:fadeSlide .3s ease both}
+.leaderboard li:hover{background:var(--surface2)}
 .leaderboard li:nth-child(1){animation-delay:0s}
-.leaderboard li:nth-child(2){animation-delay:.04s}
-.leaderboard li:nth-child(3){animation-delay:.08s}
-.leaderboard li:nth-child(4){animation-delay:.12s}
-.leaderboard li:nth-child(5){animation-delay:.16s}
-.stat-card .glow{animation:pulseGlow 3s ease-in-out infinite}
-.page{transition:opacity .25s ease}
-.broadcast-box{animation:fadeSlide .35s ease}
-#stats{transition:opacity .2s ease}
-.log-card,#topList{transition:opacity .2s ease}
-.stat-card .num{transition:color .3s ease}
-
+.leaderboard li:nth-child(2){animation-delay:.05s}
+.leaderboard li:nth-child(3){animation-delay:.10s}
+.leaderboard li:nth-child(4){animation-delay:.15s}
+.leaderboard li:nth-child(5){animation-delay:.20s}
+.leaderboard li:nth-child(6){animation-delay:.25s}
+.leaderboard li:nth-child(7){animation-delay:.30s}
+.leaderboard li:nth-child(8){animation-delay:.35s}
+.leaderboard li:nth-child(9){animation-delay:.40s}
+.leaderboard li:nth-child(10){animation-delay:.45s}
+.leaderboard .pos{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;background:var(--surface2);color:var(--text2);transition:all .3s}
+.leaderboard .pos.gold{background:rgba(251,191,36,.15);color:var(--yellow);box-shadow:0 0 12px rgba(251,191,36,.2)}
+.leaderboard .pos.silver{background:rgba(192,192,192,.12);color:#c0c0c0}
+.leaderboard .pos.bronze{background:rgba(205,127,50,.12);color:#cd7f32}
+.leaderboard .lname{flex:1;color:var(--text);font-weight:500}
+.leaderboard .lscore{color:var(--yellow);font-weight:700;font-size:15px}
+.leaderboard .lmeta{color:var(--text3);font-size:12px}
+.broadcast-box{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:28px;max-width:680px;animation:fadeSlide .4s ease}
+.broadcast-box label{display:block;font-size:14px;color:var(--text2);margin-bottom:6px;margin-top:16px;font-weight:500}
+.broadcast-box label:first-child{margin-top:0}
+.broadcast-result{margin-top:16px;padding:14px 18px;border-radius:12px;font-size:14px;display:none;animation:fadeSlide .3s ease}
+.broadcast-result.ok{display:block;background:rgba(52,211,153,.1);color:var(--green);border:1px solid rgba(52,211,153,.2)}
+.broadcast-result.fail{display:block;background:rgba(248,113,113,.1);color:var(--red);border:1px solid rgba(248,113,113,.2)}
+.user-info .name{font-weight:600;font-size:15px}
+.user-info .sub{font-size:12px;color:var(--text3);font-family:monospace;margin-top:2px;display:block}
+td .bal-val{color:var(--yellow);font-weight:700}
+.empty{text-align:center;padding:50px 20px;color:var(--text3);font-size:15px}
+@keyframes fadeSlide{from{opacity:0;transform:translateY(15px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes pulseGlow{0%,100%{opacity:.07}50%{opacity:.16}}
+@keyframes countPop{0%{transform:scale(.3);opacity:0}60%{transform:scale(1.08)}100%{transform:scale(1);opacity:1}}
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+@keyframes slideUp{from{opacity:0;transform:translateY(20px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+.stat-card{animation:slideUp .5s cubic-bezier(.4,0,.2,1) both}
+.stat-card:nth-child(1){animation-delay:.02s}
+.stat-card:nth-child(2){animation-delay:.07s}
+.stat-card:nth-child(3){animation-delay:.12s}
+.stat-card:nth-child(4){animation-delay:.17s}
+.stat-card:nth-child(5){animation-delay:.22s}
+.stat-card:nth-child(6){animation-delay:.27s}
+.stat-card:nth-child(7){animation-delay:.32s}
+.stat-card .glow{animation:pulseGlow 3.5s ease-in-out infinite}
+.stat-card .num .count-up{display:inline-block}
+.log-item{animation:fadeSlide .35s ease both}
+.log-item:nth-child(1){animation-delay:0s}
+.log-item:nth-child(2){animation-delay:.04s}
+.log-item:nth-child(3){animation-delay:.08s}
+.log-item:nth-child(4){animation-delay:.12s}
+.log-item:nth-child(5){animation-delay:.16s}
+.log-item:nth-child(6){animation-delay:.20s}
+.loading{background:linear-gradient(90deg,var(--surface) 25%,var(--surface2) 50%,var(--surface) 75%);background-size:200% 100%;animation:shimmer 1.5s ease-in-out infinite;border-radius:8px;height:20px;margin:4px 0}
+.theme-toggle{background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;padding:6px;border-radius:8px;transition:all .2s}
+.theme-toggle:hover{background:var(--surface2);color:var(--text)}
+@media(max-width:1024px){
+  .charts-grid{grid-template-columns:1fr}
+  .sidebar{width:200px;padding:24px 14px}
+  .sidebar .nav a{font-size:14px;padding:11px 14px}
+}
 @media(max-width:768px){
-  .sidebar{display:none}
-  .main{padding:16px}
+  .sidebar{width:56px;padding:16px 8px}
+  .sidebar .logo span,.sidebar .nav a span{display:none}
+  .sidebar .logo{justify-content:center;gap:0}
+  .sidebar .logo .icon{width:32px;height:32px;font-size:15px}
+  .sidebar .nav a{justify-content:center;padding:10px;font-size:16px;border-radius:8px}
+  .sidebar .nav a.active{border-left:none}
+  .main{padding:20px 16px}
+  .charts-grid{grid-template-columns:1fr}
   .stats{grid-template-columns:repeat(2,1fr)}
-  .bottom-grid{grid-template-columns:1fr}
+  .stat-card{padding:18px}
+  .stat-card .num{font-size:26px}
+  .header-bar h1{font-size:22px}
+  .filters input{width:100%}
+  .table-wrap{overflow-x:auto}
+  .table-wrap table{font-size:13px}
+  .table-wrap th,.table-wrap td{padding:10px 12px}
 }
 </style>
 </head>
 <body>
 <aside class="sidebar">
-  <div class="logo"><div class="icon">🎡</div> Edadeal Bot</div>
+  <div class="logo"><div class="icon">🎡</div><span>Edadeal Bot</span></div>
   <div class="nav">
-    <a class="active" data-page="dashboard">📊 Дашборд</a>
-    <a data-page="users">👥 Пользователи</a>
-    <a data-page="broadcast">📨 Рассылка</a>
-    <a data-page="system">📡 Система</a>
+    <a class="active" data-page="dashboard"><span>📊</span><span>Дашборд</span></a>
+    <a data-page="users"><span>👥</span><span>Пользователи</span></a>
+    <a data-page="analytics"><span>📈</span><span>Аналитика</span></a>
+    <a data-page="broadcast"><span>📨</span><span>Рассылка</span></a>
+    <a data-page="system"><span>⚙️</span><span>Система</span></a>
   </div>
-  <div style="padding-top:12px;border-top:1px solid var(--border);margin-top:auto;font-size:11px;color:var(--text3)">
-    v2.0 · обновление каждые 15с
+  <div style="padding-top:16px;border-top:1px solid var(--border);margin-top:auto;font-size:13px;color:var(--text3);text-align:center">
+    v3.0 · <span id="clock" style="font-family:monospace"></span>
   </div>
 </aside>
 
 <div class="main" id="app">
-  <!-- DASHBOARD -->
   <div class="page active" id="page-dashboard">
     <div class="header-bar">
-      <h1>📊 Дашборд</h1>
-      <button class="btn" onclick="refresh()">🔄 Обновить</button>
+      <div><h1>📊 Дашборд</h1><span class="sub">Общая статистика бота</span></div>
+      <button class="btn" onclick="refreshDashboard()">🔄 Обновить</button>
     </div>
     <div class="stats" id="stats"></div>
-    <div class="bottom-grid" style="margin-top:0">
-      <div>
-        <div class="section-header"><h2>📜 Активность</h2></div>
-        <div class="log-card" id="logList"><div class="empty">Загрузка...</div></div>
-      </div>
-      <div>
-        <div class="section-header"><h2>🏆 Топ юзеров</h2><span style="font-size:11px;color:var(--text2)">по алмазам</span></div>
-        <div class="log-card" id="topList"><div class="empty">Загрузка...</div></div>
+    <div class="charts-grid">
+      <div class="chart-card"><h3>📈 Регистрации (30 дней)</h3><canvas id="chartTimeline"></canvas></div>
+      <div class="chart-card"><h3>🎡 Активность (14 дней)</h3><canvas id="chartDaily"></canvas></div>
+      <div class="chart-card"><h3>💎 Распределение алмазов</h3><canvas id="chartBalances"></canvas></div>
+      <div class="chart-card"><h3>🏆 Топ пользователей</h3>
+        <div id="topList"><div class="empty">Загрузка...</div></div>
       </div>
     </div>
+    <div style="margin-top:8px;font-size:13px;color:var(--text3);text-align:center">⏱ Обновление каждые 15с</div>
   </div>
 
-  <!-- USERS -->
   <div class="page" id="page-users">
-    <div class="header-bar"><h1>👥 Пользователи</h1></div>
+    <div class="header-bar">
+      <div><h1>👥 Пользователи</h1><span class="sub">Управление и просмотр</span></div>
+    </div>
     <div class="filters">
-      <input type="text" id="search" placeholder="🔍 Поиск по username или ID..." oninput="loadUsers()">
+      <input type="text" id="search" placeholder="🔍 Поиск по username или ID..." oninput="loadUsersDelayed()">
       <select id="statusFilter" onchange="loadUsers()">
         <option value="">Все статусы</option>
         <option value="active">Только активные</option>
         <option value="inactive">Неактивные</option>
       </select>
+      <span id="usersCount" style="font-size:13px;color:var(--text3);margin-left:auto"></span>
     </div>
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th style="width:16px"></th>
+          <th style="width:22px"></th>
           <th>Пользователь</th>
           <th>Аккаунты</th>
           <th>Актив</th>
           <th>💎 Алмазы</th>
           <th>🎡 Прокрутки</th>
-          <th>🏆 Бонусы</th>
+          <th>🏆 Призы</th>
           <th>Последний раз</th>
         </tr></thead>
         <tbody id="usersBody"></tbody>
@@ -414,37 +573,53 @@ td .bal-val{color:var(--yellow);font-weight:600}
     </div>
   </div>
 
-  <!-- BROADCAST -->
+  <div class="page" id="page-analytics">
+    <div class="header-bar">
+      <div><h1>📈 Аналитика</h1><span class="sub">Детальные графики и метрики</span></div>
+      <button class="btn" onclick="refreshAnalytics()">🔄 Обновить</button>
+    </div>
+    <div class="charts-grid">
+      <div class="chart-card full"><h3>📊 Жизненный цикл аккаунтов (30 дней)</h3><canvas id="chartRetention"></canvas></div>
+      <div class="chart-card"><h3>🎁 Типы бонусов</h3><canvas id="chartBonuses"></canvas></div>
+      <div class="chart-card"><h3>📅 Ежедневные чекины</h3><canvas id="chartCheckins"></canvas></div>
+    </div>
+  </div>
+
   <div class="page" id="page-broadcast">
-    <div class="header-bar"><h1>📨 Рассылка</h1></div>
+    <div class="header-bar">
+      <div><h1>📨 Рассылка</h1><span class="sub">Отправка сообщений пользователям</span></div>
+    </div>
     <div class="broadcast-box">
       <label>Кому отправляем</label>
-      <select id="broadcastMode" class="filters" style="margin-bottom:12px;padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;width:auto">
+      <select id="broadcastMode" style="padding:10px 14px;width:auto;background:var(--surface);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;margin-bottom:16px">
         <option value="all">Всем пользователям</option>
         <option value="active">Только активным</option>
       </select>
       <label>Текст сообщения (HTML)</label>
-      <textarea id="broadcastText" style="width:100%;min-height:120px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--text);font-size:13px;resize:vertical;font-family:inherit" placeholder="Напишите сообщение..."></textarea>
-      <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+      <textarea id="broadcastText" placeholder="Напишите сообщение..." style="width:100%;min-height:140px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--text);font-size:14px;resize:vertical;font-family:inherit"></textarea>
+      <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
         <button class="btn btn-primary" onclick="sendBroadcast()">📨 Отправить</button>
-        <span id="broadcastStatus" style="font-size:12px;color:var(--text2)"></span>
+        <span id="broadcastStatus" style="font-size:14px;color:var(--text2)"></span>
       </div>
       <div class="broadcast-result" id="broadcastResult"></div>
     </div>
   </div>
 
-  <!-- SYSTEM -->
   <div class="page" id="page-system">
-    <div class="header-bar"><h1>📡 Система</h1></div>
-    <div class="broadcast-box" id="systemInfo">
-      <p style="color:var(--text3);font-size:13px">Загрузка...</p>
+    <div class="header-bar">
+      <div><h1>⚙️ Система</h1><span class="sub">Мониторинг и логи</span></div>
+      <button class="btn" onclick="loadSystem()">🔄 Обновить</button>
     </div>
+    <div class="stats" id="sysStats"></div>
+    <div class="log-card" id="sysLog" style="max-width:700px"></div>
   </div>
 </div>
 
 <script>
+var charts = {};
 var currentPage = 1;
 var TIMERS = [];
+var searchTimeout = null;
 
 function switchPage(name) {
   document.querySelectorAll('.page').forEach(function(p) { p.classList.remove('active'); });
@@ -453,8 +628,9 @@ function switchPage(name) {
   document.querySelector('.nav a[data-page="' + name + '"]').classList.add('active');
   TIMERS.forEach(function(t) { clearInterval(t); });
   TIMERS = [];
-  if (name === 'dashboard') { refresh(); TIMERS.push(setInterval(refresh, 15000)); }
+  if (name === 'dashboard') { refreshDashboard(); TIMERS.push(setInterval(refreshDashboard, 15000)); }
   if (name === 'users') { loadUsers(); }
+  if (name === 'analytics') { refreshAnalytics(); }
   if (name === 'system') { loadSystem(); }
 }
 
@@ -462,36 +638,99 @@ document.querySelectorAll('.nav a').forEach(function(a) {
   a.onclick = function() { switchPage(this.dataset.page); };
 });
 
+function updateClock() {
+  var d = new Date();
+  document.getElementById('clock').textContent = d.toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'});
+}
+setInterval(updateClock, 30000);
+updateClock();
+
 async function api(path) {
   try { var r = await fetch(path); return await r.json(); }
   catch(e) { return null; }
 }
 
+function animateNum(el, target, suffix) {
+  var start = 0;
+  var dur = 800;
+  var step = Math.max(1, Math.floor(target / 30));
+  var interval = Math.floor(dur / (target / step || 1));
+  if (interval < 5) { interval = 5; step = Math.ceil(target / 20); }
+  var cur = start;
+  var timer = setInterval(function() {
+    cur += step;
+    if (cur >= target) { cur = target; clearInterval(timer); }
+    el.textContent = (suffix ? cur.toLocaleString() + ' ' + suffix : cur.toLocaleString());
+  }, interval);
+}
+
+function countPop(el) { el.style.animation = 'none'; void el.offsetHeight; el.style.animation = 'countPop .5s ease'; }
+
 // === DASHBOARD ===
+async function refreshDashboard() {
+  await Promise.all([loadStats(), loadCharts(), loadTop()]);
+}
+
 async function loadStats() {
   var d = await api('/api/stats');
   if (!d) return;
   document.getElementById('stats').innerHTML =
-    '<div class="stat-card"><div class="glow"></div><div class="num" style="color:var(--blue)">'+d.users+'</div><div class="label">Пользователей</div></div>' +
-    '<div class="stat-card"><div class="glow"></div><div class="num" style="color:var(--green)">'+d.total_accounts+'</div><div class="label">Всего аккаунтов</div></div>' +
-    '<div class="stat-card"><div class="glow"></div><div class="num" style="color:var(--yellow)">'+d.active_accounts+'</div><div class="label">Активных аккаунтов</div></div>' +
-    '<div class="stat-card"><div class="glow"></div><div class="num" style="color:var(--purple)">'+d.active_users+'</div><div class="label">Активных юзеров</div></div>' +
-    '<div class="stat-card"><div class="glow"></div><div class="num" style="color:var(--pink)">'+d.total_balance.toLocaleString()+' <span style="font-size:14px">💎</span></div><div class="label">Всего алмазов</div></div>';
+    '<div class="stat-card"><div class="glow" style="background:var(--blue)"></div><div class="num" style="color:var(--blue)"><span class="count-up" id="statUsers">'+d.users+'</span></div><div class="label">👥 Пользователей</div><div class="sub">+'+d.today_users+' сегодня</div></div>' +
+    '<div class="stat-card"><div class="glow" style="background:var(--green)"></div><div class="num" style="color:var(--green)"><span class="count-up">'+d.total_accounts+'</span></div><div class="label">📦 Всего аккаунтов</div><div class="sub">+'+d.today_accounts+' сегодня</div></div>' +
+    '<div class="stat-card"><div class="glow" style="background:var(--yellow)"></div><div class="num" style="color:var(--yellow)"><span class="count-up">'+d.active_accounts+'</span></div><div class="label">✅ Активных</div><div class="sub">'+d.expired_accounts+' истекших</div></div>' +
+    '<div class="stat-card"><div class="glow" style="background:var(--purple)"></div><div class="num" style="color:var(--purple)"><span class="count-up">'+d.active_users+'</span></div><div class="label">👤 Активных юзеров</div></div>' +
+    '<div class="stat-card"><div class="glow" style="background:var(--pink)"></div><div class="num" style="color:var(--pink)"><span class="count-up">'+d.total_balance.toLocaleString()+'</span> <span style="font-size:18px">💎</span></div><div class="label">💰 Всего алмазов</div><div class="sub">среднее '+(d.active_accounts ? Math.round(d.total_balance/d.active_accounts).toLocaleString() : 0)+' на акк</div></div>' +
+    '<div class="stat-card"><div class="glow" style="background:var(--cyan)"></div><div class="num" style="color:var(--cyan)"><span class="count-up">'+d.total_spins+'</span></div><div class="label">🎡 Прокруток</div><div class="sub">'+d.total_bonuses+' призов · '+d.today_checkins+' чекинов сегодня</div></div>';
 }
 
-async function loadLog() {
-  var d = await api('/api/log?limit=15');
-  if (!d) return;
-  var el = document.getElementById('logList');
-  if (!d.length) { el.innerHTML = '<div class="empty">Нет записей</div>'; return; }
-  el.innerHTML = d.map(function(l) {
-    var badge = l.prize ? 'bonus' : 'spin';
-    var icon = l.prize ? '🎯' : '🎡';
-    var label = l.prize ? l.prize.substring(0,20) : 'spin';
-    return '<div class="log-item"><span class="ltime">'+l.time+'</span>' +
-      '<span class="lbadge '+badge+'">'+icon+'</span>' +
-      '<span class="lmsg"><b>ID:'+l.user_id+'</b> <span class="m">'+l.login_masked+'</span> — '+label+'</span></div>';
-  }).join('');
+async function loadCharts() {
+  var tl = await api('/api/stats/timeline?days=30');
+  var da = await api('/api/stats/daily?days=14');
+  var ba = await api('/api/stats/balances');
+  if (!tl || !da || !ba) return;
+
+  var colors = {blue:'#4f8aff',green:'#34d399',yellow:'#fbbf24',purple:'#a78bfa',pink:'#f472b6',red:'#f87171',cyan:'#22d3ee'};
+
+  if (charts.timeline) charts.timeline.destroy();
+  if (charts.daily) charts.daily.destroy();
+  if (charts.balances) charts.balances.destroy();
+
+  var ctx1 = document.getElementById('chartTimeline').getContext('2d');
+  charts.timeline = new Chart(ctx1, {
+    type: 'line',
+    data: {
+      labels: tl.labels.map(function(d) { return d.slice(5); }),
+      datasets: [
+        { label: 'Пользователи', data: tl.users, borderColor: colors.blue, backgroundColor: colors.blue + '18', fill: true, tension: .4, pointRadius: 2, pointHoverRadius: 5, borderWidth: 2.5 },
+        { label: 'Аккаунты', data: tl.accounts, borderColor: colors.green, backgroundColor: colors.green + '18', fill: true, tension: .4, pointRadius: 2, pointHoverRadius: 5, borderWidth: 2.5 },
+        { label: 'Активные', data: tl.active, borderColor: colors.yellow, backgroundColor: colors.yellow + '18', fill: true, tension: .4, pointRadius: 2, pointHoverRadius: 5, borderWidth: 2.5 }
+      ]
+    },
+    options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { labels: { color: '#8d97af', font: { size: 12 }, usePointStyle: true, padding: 16 } } }, scales: { x: { ticks: { color: '#586077', maxTicksLimit: 10, font: { size: 11 } }, grid: { color: '#232a3d' } }, y: { ticks: { color: '#586077', font: { size: 11 } }, grid: { color: '#232a3d' }, beginAtZero: true } } }
+  });
+
+  var ctx2 = document.getElementById('chartDaily').getContext('2d');
+  charts.daily = new Chart(ctx2, {
+    type: 'bar',
+    data: {
+      labels: da.labels.map(function(d) { return d.slice(5); }),
+      datasets: [
+        { label: 'Прокрутки', data: da.spins, backgroundColor: colors.purple + '55', borderColor: colors.purple, borderWidth: 1.5, borderRadius: 4 },
+        { label: 'Чекины', data: da.checkins, backgroundColor: colors.green + '55', borderColor: colors.green, borderWidth: 1.5, borderRadius: 4 }
+      ]
+    },
+    options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { labels: { color: '#8d97af', font: { size: 12 }, usePointStyle: true } } }, scales: { x: { ticks: { color: '#586077', font: { size: 11 } }, grid: { color: '#232a3d' } }, y: { ticks: { color: '#586077', font: { size: 11 } }, grid: { color: '#232a3d' }, beginAtZero: true } } }
+  });
+
+  var ctx3 = document.getElementById('chartBalances').getContext('2d');
+  charts.balances = new Chart(ctx3, {
+    type: 'doughnut',
+    data: {
+      labels: ba.labels,
+      datasets: [{ data: ba.values, backgroundColor: [colors.red + '77', colors.yellow + '77', colors.blue + '77', colors.purple + '77', colors.green + '77'], borderWidth: 2 }]
+    },
+    options: { responsive: true, maintainAspectRatio: false, cutout: '60%', plugins: { legend: { position: 'right', labels: { color: '#8d97af', font: { size: 12 }, padding: 14, usePointStyle: true } } } }
+  });
 }
 
 async function loadTop() {
@@ -506,16 +745,17 @@ async function loadTop() {
     var icon = i < 3 ? icons[i] : (i+1);
     return '<li><span class="pos ' + cls + '">' + icon + '</span>' +
       '<span class="lname">' + u.username + '</span>' +
+      '<span class="lmeta">' + u.accounts + ' акк · ' + u.spins + ' спин</span>' +
       '<span class="lscore">' + u.balance.toLocaleString() + ' 💎</span></li>';
   }).join('') + '</ol>';
 }
 
-async function refresh() {
-  currentPage = 1;
-  await Promise.all([loadStats(), loadLog(), loadTop()]);
+// === USERS ===
+function loadUsersDelayed() {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(loadUsers, 300);
 }
 
-// === USERS ===
 async function loadUsers() {
   var search = document.getElementById('search').value;
   var status = document.getElementById('statusFilter').value;
@@ -527,25 +767,30 @@ async function loadUsers() {
     tbody.innerHTML = '<tr><td colspan="8" class="empty">Нет пользователей</td></tr>';
     document.getElementById('paginationInfo').textContent = '0 найдено';
     document.getElementById('paginationPages').innerHTML = '';
+    document.getElementById('usersCount').textContent = '';
     return;
   }
   d.users.forEach(function(u) {
     var tr = document.createElement('tr');
     var activeDot = u.active_accounts > 0 ? 'on' : 'off';
-    var username = u.username ? '@' + u.username : 'ID: ' + u.id;
+    var name = u.first_name ? u.first_name + ' ' : '';
+    name += u.username ? '@' + u.username : 'ID: ' + u.id;
+    var lastActive = u.last_active || '—';
     tr.innerHTML = '<td><span class="expand-btn" data-uid="'+u.id+'">▶</span></td>' +
       '<td><div class="user-info"><span class="name"><span class="status-dot '+activeDot+'"></span>' +
-      username + '</span><span class="sub">ID: ' + u.id + ' · '+u.active_accounts+' активных</span></div></td>' +
+      name + '</span><span class="sub">ID: ' + u.id + '</span></div></td>' +
       '<td>'+u.accounts+'</td><td>'+u.active_accounts+'</td>' +
       '<td class="bal-val">'+u.total_balance.toLocaleString()+'</td>' +
-      '<td>'+u.total_spins+'</td><td style="color:var(--green)">'+u.total_bonuses+'</td>' +
-      '<td style="font-size:11px;color:var(--text2)">'+(u.last_active||'—')+'</td>';
+      '<td>'+u.total_spins+'</td><td style="color:var(--green);font-weight:600">'+u.total_bonuses+'</td>' +
+      '<td style="font-size:13px;color:var(--text2)">'+lastActive+'</td>';
     tbody.appendChild(tr);
   });
   document.getElementById('paginationInfo').textContent = 'Показано '+d.users.length+' из '+d.total;
+  document.getElementById('usersCount').textContent = 'Всего: '+d.total;
   var pp = document.getElementById('paginationPages');
   pp.innerHTML = '';
-  for (var i = 1; i <= d.pages && i <= 10; i++) {
+  var maxPages = Math.min(d.pages, 10);
+  for (var i = 1; i <= maxPages; i++) {
     var s = document.createElement('span');
     s.textContent = i;
     if (i === currentPage) s.className = 'active';
@@ -575,13 +820,70 @@ document.addEventListener('click', function(e) {
         var stIcon = a.status === 'active' ? '✅' : '⛔';
         return '<tr class="sub-table"><td><span class="masked">'+a.login_masked+'</span></td>' +
           '<td><span class="st '+stCls+'">'+stIcon+' '+a.status+'</span></td>' +
-          '<td class="bal">'+a.balance+' 💎</td>' +
-          '<td style="font-size:10px;color:var(--text2)">'+(a.last_spin||'—')+'</td></tr>';
+          '<td class="bal">'+a.balance.toLocaleString()+' 💎</td>' +
+          '<td style="font-size:13px;color:var(--text2)">🔄 '+(a.last_spin||'—')+'</td>' +
+          '<td style="font-size:12px;color:var(--text3)">📅 '+(a.created_at||'')+'</td></tr>';
       }).join('') +
       '</table></td>';
     row.after(tr);
   });
 });
+
+// === ANALYTICS ===
+async function refreshAnalytics() {
+  await Promise.all([loadRetentionChart(), loadBonusChart(), loadCheckinChart()]);
+}
+
+async function loadRetentionChart() {
+  var d = await api('/api/stats/retention?days=30');
+  if (!d) return;
+  if (charts.retention) charts.retention.destroy();
+  var ctx = document.getElementById('chartRetention').getContext('2d');
+  charts.retention = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: d.labels.map(function(x) { return x.slice(5); }),
+      datasets: [
+        { label: 'Создано аккаунтов', data: d.created, borderColor: '#4f8aff', backgroundColor: 'rgba(79,138,255,.08)', fill: true, tension: .4, pointRadius: 2, borderWidth: 2.5 },
+        { label: 'Активных', data: d.active, borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,.08)', fill: true, tension: .4, pointRadius: 2, borderWidth: 2.5 }
+      ]
+    },
+    options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { labels: { color: '#8d97af', font: { size: 12 }, usePointStyle: true } } }, scales: { x: { ticks: { color: '#586077', maxTicksLimit: 10, font: { size: 11 } }, grid: { color: '#232a3d' } }, y: { ticks: { color: '#586077', font: { size: 11 } }, grid: { color: '#232a3d' }, beginAtZero: true } } }
+  });
+}
+
+async function loadBonusChart() {
+  var d = await api('/api/stats/bonuses');
+  if (!d) return;
+  if (charts.bonuses) charts.bonuses.destroy();
+  var colors = ['#fbbf24','#34d399','#4f8aff','#a78bfa','#f472b6','#22d3ee','#f87171','#fb923c','#a3e635','#e879f9'];
+  var ctx = document.getElementById('chartBonuses').getContext('2d');
+  charts.bonuses = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: d.labels.map(function(l) { return l.length > 25 ? l.slice(0,25)+'…' : l; }),
+      datasets: [{ data: d.values, backgroundColor: colors.slice(0,d.labels.length).map(function(c) { return c+'77'; }), borderWidth: 2 }]
+    },
+    options: { responsive: true, maintainAspectRatio: false, cutout: '55%', plugins: { legend: { position: 'right', labels: { color: '#8d97af', font: { size: 11 }, padding: 10, usePointStyle: true } } } }
+  });
+}
+
+async function loadCheckinChart() {
+  var d = await api('/api/stats/daily?days=14');
+  if (!d) return;
+  if (charts.checkins) charts.checkins.destroy();
+  var ctx = document.getElementById('chartCheckins').getContext('2d');
+  charts.checkins = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: d.labels.map(function(x) { return x.slice(5); }),
+      datasets: [
+        { label: 'Чекины', data: d.checkins, borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,.12)', fill: true, tension: .4, pointRadius: 4, pointHoverRadius: 6, borderWidth: 2.5, pointBackgroundColor: '#34d399' }
+      ]
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#8d97af', font: { size: 12 } } } }, scales: { x: { ticks: { color: '#586077', font: { size: 11 } }, grid: { color: '#232a3d' } }, y: { ticks: { color: '#586077', font: { size: 11 } }, grid: { color: '#232a3d' }, beginAtZero: true } } }
+  });
+}
 
 // === BROADCAST ===
 async function sendBroadcast() {
@@ -601,7 +903,7 @@ async function sendBroadcast() {
     var el = document.getElementById('broadcastResult');
     if (d.ok) {
       el.className = 'broadcast-result ok';
-      el.innerHTML = '✅ Отправлено: ' + d.sent + ', Ошибок: ' + d.failed;
+      el.innerHTML = '✅ Отправлено: <b>' + d.sent + '</b>, Ошибок: <b>' + d.failed + '</b>';
       document.getElementById('broadcastStatus').textContent = '✅ Готово';
     } else {
       el.className = 'broadcast-result fail';
@@ -618,18 +920,15 @@ async function sendBroadcast() {
 
 // === SYSTEM ===
 async function loadSystem() {
-  var el = document.getElementById('systemInfo');
   var d = await api('/api/stats');
   var slog = await api('/api/dashboard/log');
-  if (!d) { el.innerHTML = '<p style="color:var(--text3)">Ошибка загрузки</p>'; return; }
-  var html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">';
-  html += '<div><span style="color:var(--text2);font-size:12px">Пользователей сегодня</span><br><span style="font-size:20px;font-weight:700">'+d.today_users+'</span></div>';
-  html += '<div><span style="color:var(--text2);font-size:12px">Аккаунтов сегодня</span><br><span style="font-size:20px;font-weight:700">'+d.today_accounts+'</span></div>';
-  html += '<div><span style="color:var(--text2);font-size:12px">Всего прокруток</span><br><span style="font-size:20px;font-weight:700">'+d.total_spins+'</span></div>';
-  html += '<div><span style="color:var(--text2);font-size:12px">Всего призов</span><br><span style="font-size:20px;font-weight:700">'+d.total_bonuses+'</span></div>';
-  html += '</div>';
-  html += '<div class="section-header"><h2>📋 Лог действий</h2></div>';
-  html += '<div class="log-card">';
+  if (!d) { document.getElementById('sysStats').innerHTML = '<div class="empty">Ошибка</div>'; return; }
+  document.getElementById('sysStats').innerHTML =
+    '<div class="stat-card"><div class="glow" style="background:var(--blue)"></div><div class="num" style="color:var(--blue)">'+d.today_users+'</div><div class="label">👥 Новых юзеров сегодня</div></div>' +
+    '<div class="stat-card"><div class="glow" style="background:var(--green)"></div><div class="num" style="color:var(--green)">'+d.today_accounts+'</div><div class="label">📦 Новых аккаунтов сегодня</div></div>' +
+    '<div class="stat-card"><div class="glow" style="background:var(--yellow)"></div><div class="num" style="color:var(--yellow)">'+d.total_spins+'</div><div class="label">🎡 Всего прокруток</div></div>' +
+    '<div class="stat-card"><div class="glow" style="background:var(--cyan)"></div><div class="num" style="color:var(--cyan)">'+d.total_bonuses+'</div><div class="label">🏆 Всего призов</div></div>';
+  var html = '<div style="padding:20px"><h3 style="font-size:15px;color:var(--text2);margin-bottom:14px;display:flex;align-items:center;gap:8px">📋 Лог действий</h3>';
   if (slog && slog.length) {
     slog.forEach(function(l) {
       html += '<div class="log-item"><span class="ltime">'+l.time+'</span><span class="lbadge broadcast">⚙️</span><span class="lmsg"><b>'+l.action+'</b> — '+l.detail+'</span></div>';
@@ -638,12 +937,12 @@ async function loadSystem() {
     html += '<div class="empty">Нет записей</div>';
   }
   html += '</div>';
-  el.innerHTML = html;
+  document.getElementById('sysLog').innerHTML = html;
 }
 
 // Init
-refresh();
-TIMERS.push(setInterval(refresh, 15000));
+refreshDashboard();
+TIMERS.push(setInterval(refreshDashboard, 15000));
 </script>
 </body>
 </html>"""
