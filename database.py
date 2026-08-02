@@ -114,6 +114,26 @@ def init_db():
                 spun_at TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tracking_accounts (
+                id SERIAL PRIMARY KEY,
+                yandex_token TEXT NOT NULL,
+                login TEXT DEFAULT '',
+                duid TEXT DEFAULT '',
+                edadeal_uid TEXT DEFAULT '',
+                last_balance INTEGER,
+                last_checked TEXT,
+                status TEXT DEFAULT 'active',
+                created_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tracking_log (
+                id SERIAL PRIMARY KEY,
+                event_time TEXT,
+                message TEXT
+            )
+        """)
     else:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
@@ -141,6 +161,22 @@ def init_db():
                 prize_img TEXT DEFAULT '',
                 balance_after INTEGER DEFAULT 0,
                 spun_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS tracking_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                yandex_token TEXT NOT NULL,
+                login TEXT DEFAULT '',
+                duid TEXT DEFAULT '',
+                edadeal_uid TEXT DEFAULT '',
+                last_balance INTEGER,
+                last_checked TEXT,
+                status TEXT DEFAULT 'active',
+                created_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS tracking_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_time TEXT,
+                message TEXT
             );
         """)
     conn.commit()
@@ -284,3 +320,77 @@ def get_user_stats(user_id):
         "total_spins": spins,
         "total_balance": balance,
     }
+
+
+def set_tracking_account(yandex_token, login="", duid="", edadeal_uid=""):
+    """Replace the single tracking account (only one at a time)."""
+    conn = get_conn()
+    now = datetime.now().isoformat()
+    conn.execute("DELETE FROM tracking_accounts")
+    conn.execute("DELETE FROM tracking_log")
+    if _is_pg():
+        cur = conn.execute(
+            "INSERT INTO tracking_accounts (yandex_token, login, duid, edadeal_uid, last_balance, created_at) VALUES (?,?,?,?,?,?) RETURNING id",
+            (yandex_token, login, duid, edadeal_uid, None, now),
+        )
+    else:
+        cur = conn.execute(
+            "INSERT INTO tracking_accounts (yandex_token, login, duid, edadeal_uid, last_balance, created_at) VALUES (?,?,?,?,?,?)",
+            (yandex_token, login, duid, edadeal_uid, None, now),
+        )
+    conn.commit()
+    return _lastrowid(cur)
+
+
+def get_tracking_account():
+    conn = get_conn()
+    return conn.execute("SELECT * FROM tracking_accounts LIMIT 1").fetchone()
+
+
+def delete_tracking_account():
+    conn = get_conn()
+    conn.execute("DELETE FROM tracking_accounts")
+    conn.execute("DELETE FROM tracking_log")
+    conn.commit()
+
+
+def update_tracking_balance(account_id, balance):
+    conn = get_conn()
+    now = datetime.now().isoformat()
+    conn.execute(
+        "UPDATE tracking_accounts SET last_balance=?, last_checked=? WHERE id=?",
+        (balance, now, account_id),
+    )
+    conn.commit()
+
+
+def update_tracking_status(account_id, status):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE tracking_accounts SET status=? WHERE id=?", (status, account_id)
+    )
+    conn.commit()
+
+
+def add_tracking_log(message):
+    conn = get_conn()
+    now = datetime.now().isoformat()
+    if _is_pg():
+        conn.execute(
+            "INSERT INTO tracking_log (event_time, message) VALUES (?,?) RETURNING id",
+            (now, message),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO tracking_log (event_time, message) VALUES (?,?)",
+            (now, message),
+        )
+    conn.commit()
+
+
+def get_tracking_log(limit=50):
+    conn = get_conn()
+    return conn.execute(
+        "SELECT event_time, message FROM tracking_log ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()

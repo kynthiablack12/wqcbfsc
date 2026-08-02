@@ -11,6 +11,7 @@ _spin_executor = ThreadPoolExecutor(max_workers=3)
 _spin_semaphore = asyncio.Semaphore(3)
 
 CHECKIN_INTERVAL = 12 * 60 * 60  # 12 hours = 2x/day
+TRACKING_INTERVAL = 60  # poll tracking account balance every 1 minute
 
 
 async def to_thread(func, *args, timeout=25):
@@ -107,3 +108,139 @@ async def daily_checkin_loop():
             tasks = [checked(acc) for acc in accounts]
             await asyncio.gather(*tasks)
         await asyncio.sleep(CHECKIN_INTERVAL)
+
+
+def _run_all_triggers_for_account(account):
+    """Run the 4 bonus triggers (welcome, chain, plus, 500) for one account."""
+    login = account["login"] or "unknown"
+    try:
+        auth = edadeal.authenticate(account["yandex_token"])
+        if not auth["ok"]:
+            return {"login": login, "ok": False, "error": "auth failed"}
+
+        jwt = auth["jwt"]
+        duid = auth.get("duid")
+        uid = auth.get("uid")
+
+        welcome = edadeal.claim_welcome_bonus(jwt, duid, uid)
+        chain = edadeal.claim_chain_bonus(jwt, duid, uid)
+        plus = edadeal.claim_plus_bonuses(jwt, duid, uid)
+        b500 = edadeal.claim_500_plus_bonus(jwt, duid, uid)
+
+        return {
+            "login": login,
+            "ok": True,
+            "welcome": bool(welcome.get("claimed")),
+            "chain": int(chain.get("claimed", 0) or 0),
+            "plus": int(plus.get("claimed", 0) or 0),
+            "b500": bool(b500.get("ok")),
+        }
+    except Exception as e:
+        return {"login": login, "ok": False, "error": str(e)}
+
+
+async def _run_all_triggers_async():
+    accounts = db.get_all_active_accounts()
+    if not accounts:
+        return {"ok": False, "error": "no accounts"}
+
+    sem = asyncio.Semaphore(5)
+
+    async def one(acc):
+        async with sem:
+            return await to_thread(_run_all_triggers_for_account, acc, timeout=120)
+
+    results = await asyncio.gather(*[one(a) for a in accounts], return_exceptions=True)
+
+    ok = [r for r in results if isinstance(r, dict) and r.get("ok")]
+    fail = [r for r in results if not (isinstance(r, dict) and r.get("ok"))]
+    return {
+        "ok": True,
+        "total": len(accounts),
+        "ok_count": len(ok),
+        "fail_count": len(fail),
+        "welcome": sum(1 for r in ok if r.get("welcome")),
+        "chain": sum(r.get("chain", 0) for r in ok),
+        "plus": sum(r.get("plus", 0) for r in ok),
+        "b500": sum(1 for r in ok if r.get("b500")),
+        "details": ok + fail,
+    }
+
+
+async def run_all_triggers():
+    """Public wrapper — run the 4 bonus triggers on all active accounts."""
+    return await _run_all_triggers_async()
+
+
+async def tracking_loop():
+    """Poll the tracking account's diamond balance every minute.
+    When it changes, run the 4 triggers on ALL active accounts and log to the admin dashboard."""
+    logging.info("[tracking] start")
+    while True:
+        try:
+            tracker = db.get_tracking_account()
+            if tracker is None:
+                await asyncio.sleep(TRACKING_INTERVAL)
+                continue
+
+            auth = await to_thread(edadeal.authenticate, tracker["yandex_token"], timeout=30)
+            if not auth["ok"]:
+                db.update_tracking_status(tracker["id"], "expired")
+                await asyncio.sleep(TRACKING_INTERVAL)
+                continue
+
+            bal = await to_thread(
+                edadeal.get_diamond_balance,
+                auth["jwt"], auth.get("duid"), auth.get("uid"),
+                timeout=30,
+            )
+            if not bal["ok"]:
+                await asyncio.sleep(TRACKING_INTERVAL)
+                continue
+
+            new_balance = bal["balance"]
+            old_balance = tracker["last_balance"]
+
+            if old_balance is None:
+                # First observation — just record it, no trigger yet
+                db.update_tracking_balance(tracker["id"], new_balance)
+                db.add_tracking_log(
+                    f"🟢 Отслеживание запущено. Текущий баланс: {new_balance} 💎"
+                )
+                _dash_log("tracking", "init", f"balance={new_balance}")
+            elif new_balance != old_balance:
+                db.update_tracking_balance(tracker["id"], new_balance)
+                db.add_tracking_log(
+                    f"⚡ Баланс изменился: {old_balance} → {new_balance} 💎. Запускаю триггеры на все аккаунты..."
+                )
+                _dash_log("tracking", "balance_change", f"{old_balance}->{new_balance}")
+
+                result = await _run_all_triggers_async()
+                if result.get("ok"):
+                    msg = (
+                        f"✅ Триггеры выполнены: {result['ok_count']}/{result['total']} аккаунтов "
+                        f"(welcome={result['welcome']}, chain={result['chain']}, plus={result['plus']}, b500={result['b500']})"
+                    )
+                else:
+                    msg = f"❌ Триггеры не выполнены: {result.get('error', '?')}"
+                db.add_tracking_log(msg)
+                _dash_log("tracking", "triggers_done", msg)
+                logging.info("[tracking] %s", msg)
+            else:
+                # Balance unchanged — nothing to do
+                db.update_tracking_balance(tracker["id"], new_balance)
+
+        except Exception as e:
+            logging.exception("[tracking] error: %s", e)
+            _dash_log("tracking", "error", str(e))
+
+        await asyncio.sleep(TRACKING_INTERVAL)
+
+
+def _dash_log(user_id, action, detail):
+    """Safe proxy to the admin dashboard log (avoids hard import of web.py)."""
+    try:
+        from web import add_log
+        add_log(user_id, action, detail)
+    except Exception:
+        pass

@@ -72,6 +72,7 @@ WELCOME_TRIGGER_ID = "7964dad0-5589-4c5f-8594-aa227deba4b8"
 CHAIN_TRIGGER_ID = "41d7366f-83b1-4fa1-9a51-47ae69b99fae"
 PLUS_TRIGGER_ID = "22ddec2c-8662-434a-a205-64038cc75fc3"
 PLUS_BLOCK_URL = "https://api.edadeal.ru/api/mosaic/api/v1/blocks?id=19741%2F19&supports_phoenix=1&experiment_id=x5reward"
+PLUS_POINTS_BLOCK_URL = "https://api.edadeal.ru/api/mosaic/api/v1/blocks?id=19628%2F11&supports_phoenix=1"
 BONUS_500_TRIGGER_URL = f"{TRIGGER_BASE}/{WELCOME_TRIGGER_ID}?krokenUuid=51d222d1-e01a-4b81-a765-c51977a60be2"
 
 PLUS_AWARD_URLS = [
@@ -223,6 +224,50 @@ def get_diamond_balance(jwt, duid=None, edadeal_uid=None):
             return {"ok": False, "error": f"HTTP {resp.status_code}"}
         data = resp.json()
         return {"ok": True, "balance": data.get("balance", 0), "possible": data.get("possibleActivationAmount", 0)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def get_plus_points_counts(jwt, duid=None, edadeal_uid=None):
+    """Fetch the 'Plus points for diamonds' block and extract per-card 'шт' badge counts."""
+    if not jwt:
+        return {"ok": False, "error": "No JWT"}
+    try:
+        r = _session().get(PLUS_POINTS_BLOCK_URL, headers=_h(jwt, duid, edadeal_uid), timeout=TMO)
+        if r.status_code != 200:
+            return {"ok": False, "error": f"HTTP {r.status_code}"}
+        data = r.json()
+        cards = []
+        try:
+            cards = data["blocks"][0]["card"]["states"][0]["div"]["items"][0]["items"][1]["items"]
+        except (KeyError, IndexError, TypeError):
+            return {"ok": True, "cards": [], "total": 0}
+
+        parsed = []
+        for card in cards:
+            info = {"count": 0, "points": 0, "slug": ""}
+            def walk(o):
+                if isinstance(o, dict):
+                    t = o.get("text")
+                    if isinstance(t, str) and "toInteger" in t and "+ '" in t:
+                        m = re.search(r"toInteger\('(\d+)'\)", t)
+                        if m:
+                            info["count"] = int(m.group(1))
+                    elif isinstance(t, str) and re.fullmatch(r"\d[\d ]*", t) and info["points"] == 0:
+                        info["points"] = int(t.replace(" ", ""))
+                    p = o.get("payload")
+                    if isinstance(p, dict) and p.get("slug"):
+                        info["slug"] = p["slug"]
+                    for v in o.values():
+                        walk(v)
+                elif isinstance(o, list):
+                    for v in o:
+                        walk(v)
+            walk(card)
+            parsed.append(info)
+
+        parsed.sort(key=lambda x: x["points"])
+        return {"ok": True, "cards": parsed, "total": sum(c["count"] for c in parsed)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

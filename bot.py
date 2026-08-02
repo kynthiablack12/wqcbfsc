@@ -33,6 +33,7 @@ SPIN_ALL_STOP = {}
 EDIT_LOCKS = {}
 LAST_ACTION = {}       # uid -> timestamp
 RATE_LIMIT_SEC = 0.5
+ACCOUNTS_CACHE = {}    # uid -> {"accounts": [...], "page": int, "total_pages": int}
 
 # DDoS protection
 _ACTION_HISTORY = {}    # uid -> [timestamps]
@@ -109,6 +110,49 @@ def after_add_kb():
         [InlineKeyboardButton("➕ Добавить ещё", callback_data="add_account")],
         [InlineKeyboardButton("◀️ В меню", callback_data="menu")],
     ])
+
+
+ACCOUNTS_PAGE_SIZE = 10
+
+
+def _account_pages_kb(total_pages, page):
+    buttons = []
+    row = []
+    if page > 0:
+        row.append(InlineKeyboardButton("◀️", callback_data=f"accounts_page:{page - 1}"))
+    row.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        row.append(InlineKeyboardButton("▶️", callback_data=f"accounts_page:{page + 1}"))
+    buttons.append(row)
+    buttons.append([InlineKeyboardButton("🔄 Обновить балансы", callback_data="refresh_balances")])
+    buttons.append([InlineKeyboardButton("➕ Добавить", callback_data="add_account")])
+    buttons.append([InlineKeyboardButton("◀️ В меню", callback_data="menu")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _accounts_text(uid, page):
+    cache = ACCOUNTS_CACHE.get(uid)
+    if not cache:
+        return None, None
+    total_pages = cache["total_pages"]
+    page = max(0, min(page, total_pages - 1))
+    cache["page"] = page
+    start = page * ACCOUNTS_PAGE_SIZE
+    chunk = cache["accounts"][start:start + ACCOUNTS_PAGE_SIZE]
+    buttons = []
+    total_bal = 0
+    for acc in chunk:
+        s = "✅" if acc["status"] == "active" else "⚠️"
+        bal = acc["last_balance"] or 0
+        total_bal += bal
+        buttons.append([
+            InlineKeyboardButton(
+                f"{s} {acc['login']}  💎{bal}",
+                callback_data=f"account:{acc['id']}",
+            )
+        ])
+    kb = _account_pages_kb(total_pages, page)
+    return total_bal, InlineKeyboardMarkup(buttons + kb.inline_keyboard)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,6 +322,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         asyncio.create_task(do_checkin(msg.chat_id, msg.message_id))
 
+    elif data == "noop":
+        await q.answer()
+
     elif data == "refresh_balances":
         accounts = db.get_user_accounts(uid)
         active = [a for a in accounts if a["status"] == "active"]
@@ -308,24 +355,52 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 bal_map[r[0]] = r[1]
                 total += r[1]
 
-        buttons = []
+        accounts = db.get_user_accounts(uid)
         for acc in accounts:
-            s = "✅" if acc["status"] == "active" else "⚠️"
-            bal = bal_map.get(acc["id"], acc["last_balance"] or 0)
-            buttons.append([
-                InlineKeyboardButton(
-                    f"{s} {acc['login']}  💎{bal}",
-                    callback_data=f"account:{acc['id']}",
-                )
-            ])
-        buttons.append([InlineKeyboardButton("🔄 Обновить балансы", callback_data="refresh_balances")])
-        buttons.append([InlineKeyboardButton("➕ Добавить", callback_data="add_account")])
-        buttons.append([InlineKeyboardButton("◀️ В меню", callback_data="menu")])
+            if acc["id"] in bal_map:
+                acc["last_balance"] = bal_map[acc["id"]]
+
+        total_pages = max(1, (len(accounts) + ACCOUNTS_PAGE_SIZE - 1) // ACCOUNTS_PAGE_SIZE)
+        ACCOUNTS_CACHE[uid] = {"accounts": list(accounts), "page": 0, "total_pages": total_pages}
+        bal, kb = _accounts_text(uid, 0)
 
         try:
             await msg.edit_text(
-                f"📋 <b>Аккаунты</b>  💎 {total} всего\nВыбери:",
-                reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML",
+                f"📋 <b>Аккаунты</b>  💎 {bal} всего\nВыбери:",
+                reply_markup=kb, parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    elif data == "accounts_page":
+        cache = ACCOUNTS_CACHE.get(uid)
+        if not cache:
+            await q.answer("Сначала открой список")
+            return
+        bal, kb = _accounts_text(uid, cache["page"])
+        try:
+            await q.edit_message_text(
+                f"📋 <b>Аккаунты</b>  💎 {bal} всего\nВыбери:",
+                reply_markup=kb, parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    elif data.startswith("accounts_page:"):
+        try:
+            page = int(data.split(":")[1])
+        except (ValueError, IndexError):
+            await q.answer("Ошибка")
+            return
+        cache = ACCOUNTS_CACHE.get(uid)
+        if not cache:
+            await q.answer("Сначала открой список")
+            return
+        bal, kb = _accounts_text(uid, page)
+        try:
+            await q.edit_message_text(
+                f"📋 <b>Аккаунты</b>  💎 {bal} всего\nВыбери:",
+                reply_markup=kb, parse_mode="HTML",
             )
         except Exception:
             pass
@@ -360,25 +435,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        buttons = []
-        total_bal = 0
-        for acc in accounts:
-            s = "✅" if acc["status"] == "active" else "⚠️"
-            bal = acc["last_balance"] or 0
-            total_bal += bal
-            buttons.append([
-                InlineKeyboardButton(
-                    f"{s} {acc['login']}  💎{bal}",
-                    callback_data=f"account:{acc['id']}",
-                )
-            ])
-        buttons.append([InlineKeyboardButton("🔄 Обновить балансы", callback_data="refresh_balances")])
-        buttons.append([InlineKeyboardButton("➕ Добавить", callback_data="add_account")])
-        buttons.append([InlineKeyboardButton("◀️ В меню", callback_data="menu")])
+        total_pages = max(1, (len(accounts) + ACCOUNTS_PAGE_SIZE - 1) // ACCOUNTS_PAGE_SIZE)
+        ACCOUNTS_CACHE[uid] = {"accounts": list(accounts), "page": 0, "total_pages": total_pages}
+        bal, kb = _accounts_text(uid, 0)
 
         await q.edit_message_text(
-            f"📋 <b>Аккаунты</b>  💎 {total_bal} всего\nВыбери:",
-            reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML",
+            f"📋 <b>Аккаунты</b>  💎 {bal} всего\nВыбери:",
+            reply_markup=kb, parse_mode="HTML",
         )
 
     elif data.startswith("account:"):
@@ -629,6 +692,7 @@ def main():
     async def post_init(application):
         print("[Bot] Started!")
         asyncio.create_task(sched.daily_checkin_loop())
+        asyncio.create_task(sched.tracking_loop())
 
     app.post_init = post_init
 

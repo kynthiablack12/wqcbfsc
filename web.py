@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse
 import uvicorn
 
 import database as db
+import edadeal
 from config import TG_BOT_TOKEN
 
 BASE = Path(__file__).parent
@@ -344,6 +345,78 @@ def api_dashboard_log():
         return list(_log_buffer)
 
 
+@app.get("/api/tracking")
+def api_tracking():
+    tracker = db.get_tracking_account()
+    log = db.get_tracking_log(50)
+    t = None
+    if tracker:
+        t = {
+            "id": tracker["id"],
+            "login": tracker["login"] or "?",
+            "last_balance": tracker["last_balance"],
+            "last_checked": (
+                datetime.fromisoformat(tracker["last_checked"]).strftime("%d.%m %H:%M:%S")
+                if tracker["last_checked"] else ""
+            ),
+            "status": tracker["status"] or "active",
+        }
+    entries = []
+    for r in log:
+        entries.append({
+            "time": (
+                datetime.fromisoformat(r["event_time"]).strftime("%d.%m %H:%M:%S")
+                if r["event_time"] else ""
+            ),
+            "message": r["message"],
+        })
+    return {"tracker": t, "log": entries}
+
+
+@app.post("/api/tracking/add")
+def api_tracking_add(data: dict):
+    token = (data.get("token") or "").strip()
+    if not token.startswith("y0__"):
+        return {"ok": False, "error": "Токен должен начинаться с y0__"}
+
+    yandex_check = edadeal.check_yandex_token(token)
+    if not yandex_check["ok"]:
+        return {"ok": False, "error": f"Яндекс-токен недействителен: {yandex_check['error']}"}
+
+    auth = edadeal.authenticate(token)
+    if not auth["ok"]:
+        return {"ok": False, "error": f"Ошибка авторизации Едадил: {auth['error']}"}
+
+    db.set_tracking_account(
+        token,
+        login=yandex_check["login"],
+        duid=auth.get("duid", ""),
+        edadeal_uid=auth.get("uid", ""),
+    )
+    db.add_tracking_log(f"🆕 Отслеживающий аккаунт добавлен: {yandex_check['login']}")
+    add_log("admin", "tracking_add", yandex_check["login"])
+    return {"ok": True, "login": yandex_check["login"]}
+
+
+@app.post("/api/tracking/delete")
+def api_tracking_delete():
+    tracker = db.get_tracking_account()
+    if tracker:
+        db.add_tracking_log(f"🗑 Отслеживающий аккаунт удалён: {tracker['login']}")
+        add_log("admin", "tracking_delete", tracker["login"])
+    db.delete_tracking_account()
+    return {"ok": True}
+
+
+@app.get("/api/tracking/triggers/last")
+def api_tracking_triggers_last():
+    log = db.get_tracking_log(50)
+    rows = [r for r in log if "Триггеры" in r["message"]]
+    if not rows:
+        return {"ok": False, "error": "Триггеры ещё не запускались"}
+    return {"ok": True, "message": rows[0]["message"]}
+
+
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -524,6 +597,7 @@ td .bal-val{color:var(--yellow);font-weight:700}
     <a class="active" data-page="dashboard"><span>📊</span><span>Дашборд</span></a>
     <a data-page="users"><span>👥</span><span>Пользователи</span></a>
     <a data-page="analytics"><span>📈</span><span>Аналитика</span></a>
+    <a data-page="tracking"><span>🔍</span><span>Трекинг</span></a>
     <a data-page="broadcast"><span>📨</span><span>Рассылка</span></a>
     <a data-page="system"><span>⚙️</span><span>Система</span></a>
   </div>
@@ -596,6 +670,24 @@ td .bal-val{color:var(--yellow);font-weight:700}
     </div>
   </div>
 
+  <div class="page" id="page-tracking">
+    <div class="header-bar">
+      <div><h1>🔍 Трекинг</h1><span class="sub">Отслеживающий аккаунт: меняется баланс → триггеры на все аккаунты</span></div>
+      <button class="btn" onclick="loadTracking()">🔄 Обновить</button>
+    </div>
+    <div class="broadcast-box">
+      <label>Яндекс-токен отслеживающего аккаунта (y0__...)</label>
+      <input id="trackingToken" type="text" placeholder="y0__..." style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--text);font-size:14px;font-family:monospace">
+      <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="addTracking()">➕ Добавить аккаунт</button>
+        <button class="btn" onclick="deleteTracking()" style="border-color:rgba(248,113,113,.4);color:var(--red)">🗑 Удалить</button>
+        <span id="trackingStatus" style="font-size:14px;color:var(--text2)"></span>
+      </div>
+    </div>
+    <div class="stats" id="trackingInfo" style="margin-top:24px"></div>
+    <div class="log-card" id="trackingLog" style="max-width:700px"></div>
+  </div>
+
   <div class="page" id="page-broadcast">
     <div class="header-bar">
       <div><h1>📨 Рассылка</h1><span class="sub">Отправка сообщений пользователям</span></div>
@@ -644,6 +736,7 @@ function switchPage(name) {
   if (name === 'dashboard') { refreshDashboard(); TIMERS.push(setInterval(refreshDashboard, 15000)); }
   if (name === 'users') { loadUsers(); }
   if (name === 'analytics') { refreshAnalytics(); }
+  if (name === 'tracking') { loadTracking(); }
   if (name === 'system') { loadSystem(); }
 }
 
@@ -896,6 +989,74 @@ async function loadCheckinChart() {
     },
     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#8d97af', font: { size: 12 } } } }, scales: { x: { ticks: { color: '#586077', font: { size: 11 } }, grid: { color: '#232a3d' } }, y: { ticks: { color: '#586077', font: { size: 11 } }, grid: { color: '#232a3d' }, beginAtZero: true } } }
   });
+}
+
+// === TRACKING ===
+async function loadTracking() {
+  var d = await api('/api/tracking');
+  if (!d) return;
+  var info = document.getElementById('trackingInfo');
+  if (d.tracker) {
+    var st = d.tracker.status === 'active' ? '✅ Активен' : '⛔ ' + d.tracker.status;
+    info.innerHTML =
+      '<div class="stat-card"><div class="glow" style="background:var(--green)"></div><div class="num" style="color:var(--green)">'+(d.tracker.last_balance != null ? d.tracker.last_balance : '—')+'</div><div class="label">💎 Баланс</div><div class="sub">'+st+'</div></div>' +
+      '<div class="stat-card"><div class="glow" style="background:var(--blue)"></div><div class="num" style="color:var(--blue);font-size:18px;word-break:break-all">'+d.tracker.login+'</div><div class="label">👤 Аккаунт</div><div class="sub">обновлено: '+(d.tracker.last_checked||'—')+'</div></div>';
+  } else {
+    info.innerHTML = '<div class="empty" style="width:100%">Отслеживающий аккаунт не задан — добавьте токен выше</div>';
+  }
+  var html = '<div style="padding:20px"><h3 style="font-size:15px;color:var(--text2);margin-bottom:14px;display:flex;align-items:center;gap:8px">📋 Лог трекинга</h3>';
+  if (d.log && d.log.length) {
+    d.log.forEach(function(l) {
+      html += '<div class="log-item"><span class="ltime">'+l.time+'</span><span class="lbadge broadcast">🔍</span><span class="lmsg">'+l.message+'</span></div>';
+    });
+  } else {
+    html += '<div class="empty">Нет записей</div>';
+  }
+  html += '</div>';
+  document.getElementById('trackingLog').innerHTML = html;
+}
+
+async function addTracking() {
+  var token = document.getElementById('trackingToken').value.trim();
+  var statusEl = document.getElementById('trackingStatus');
+  if (!token) { statusEl.textContent = '❌ Вставьте токен'; return; }
+  statusEl.textContent = '⏳ Проверяю токен...';
+  var btn = document.querySelector('#page-tracking .btn-primary');
+  btn.disabled = true;
+  try {
+    var r = await fetch('/api/tracking/add', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({token: token}),
+    });
+    var d = await r.json();
+    if (d.ok) {
+      statusEl.textContent = '✅ Добавлен: ' + d.login;
+      document.getElementById('trackingToken').value = '';
+    } else {
+      statusEl.textContent = '❌ ' + (d.error || 'Ошибка');
+    }
+  } catch(e) {
+    statusEl.textContent = '❌ Ошибка соединения';
+  }
+  btn.disabled = false;
+  loadTracking();
+}
+
+async function deleteTracking() {
+  var statusEl = document.getElementById('trackingStatus');
+  statusEl.textContent = '⏳ Удаляю...';
+  try {
+    await fetch('/api/tracking/delete', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: '{}',
+    });
+    statusEl.textContent = '✅ Удалён';
+  } catch(e) {
+    statusEl.textContent = '❌ Ошибка соединения';
+  }
+  loadTracking();
 }
 
 // === BROADCAST ===
