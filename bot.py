@@ -152,7 +152,8 @@ def _accounts_text(uid, page):
             )
         ])
     kb = _account_pages_kb(total_pages, page)
-    return total_bal, InlineKeyboardMarkup(buttons + kb.inline_keyboard)
+    buttons.extend(list(kb.inline_keyboard))
+    return total_bal, InlineKeyboardMarkup(buttons)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
