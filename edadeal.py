@@ -264,7 +264,8 @@ def get_plus_points_counts(jwt, duid=None, edadeal_uid=None):
                     for v in o:
                         walk(v)
             walk(card)
-            parsed.append(info)
+            if info["points"] in (25, 50, 100, 250):
+                parsed.append(info)
 
         parsed.sort(key=lambda x: x["points"])
         return {"ok": True, "cards": parsed, "total": sum(c["count"] for c in parsed)}

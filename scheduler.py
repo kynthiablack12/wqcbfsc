@@ -125,7 +125,6 @@ def _run_all_triggers_for_account(account):
         welcome = edadeal.claim_welcome_bonus(jwt, duid, uid)
         chain = edadeal.claim_chain_bonus(jwt, duid, uid)
         plus = edadeal.claim_plus_bonuses(jwt, duid, uid)
-        b500 = edadeal.claim_500_plus_bonus(jwt, duid, uid)
 
         return {
             "login": login,
@@ -133,7 +132,6 @@ def _run_all_triggers_for_account(account):
             "welcome": bool(welcome.get("claimed")),
             "chain": int(chain.get("claimed", 0) or 0),
             "plus": int(plus.get("claimed", 0) or 0),
-            "b500": bool(b500.get("ok")),
         }
     except Exception as e:
         return {"login": login, "ok": False, "error": str(e)}
@@ -162,7 +160,6 @@ async def _run_all_triggers_async():
         "welcome": sum(1 for r in ok if r.get("welcome")),
         "chain": sum(r.get("chain", 0) for r in ok),
         "plus": sum(r.get("plus", 0) for r in ok),
-        "b500": sum(1 for r in ok if r.get("b500")),
         "details": ok + fail,
     }
 
@@ -185,8 +182,8 @@ def _cards_summary(cards):
 
 async def tracking_loop():
     """Poll the tracking account's 'Plus points for diamonds' block (19628/11) every minute.
-    Watches for available positions (100/500/1000 'шт'). When they appear or change,
-    run the 4 triggers on ALL active accounts and log to the admin dashboard."""
+    Watches for available positions (25/50/100/250 'шт'). When they appear or change,
+    run the bonus triggers on ALL active accounts and log to the admin dashboard."""
     logging.info("[tracking] start")
     while True:
         try:
@@ -237,7 +234,7 @@ async def tracking_loop():
                 if result.get("ok"):
                     msg = (
                         f"✅ Триггеры выполнены: {result['ok_count']}/{result['total']} аккаунтов "
-                        f"(welcome={result['welcome']}, chain={result['chain']}, plus={result['plus']}, b500={result['b500']})"
+                        f"(welcome={result['welcome']}, chain={result['chain']}, plus={result['plus']})"
                     )
                 else:
                     msg = f"❌ Триггеры не выполнены: {result.get('error', '?')}"
