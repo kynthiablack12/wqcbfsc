@@ -570,12 +570,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     failed.append((acc["login"], "недоступно"))
 
-            tasks = [process(acc) for acc in active]
             done = 0
-            for coro in asyncio.as_completed(tasks):
-                await coro
+            for acc in active:
+                await process(acc)
                 done += 1
-                if done % 5 == 0 or done == len(tasks):
+                if done % 5 == 0 or done == len(active):
                     try:
                         await context.bot.edit_message_text(
                             f"🎟 <b>{title}</b>\n\n"
@@ -585,6 +584,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     except Exception:
                         pass
+                if done < len(active):
+                    await asyncio.sleep(2)
 
             lines = [f"🎟 <b>{title}</b>\n\n<i>{offer}</i>\n"]
             if got:
