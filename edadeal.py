@@ -367,3 +367,41 @@ def claim_500_plus_bonus(jwt, duid=None, edadeal_uid=None):
         return {"ok": r.status_code == 302, "status": r.status_code}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def get_coupon_code(jwt, duid=None, edadeal_uid=None, campaign_id=""):
+    """Get a promo code for a couponhub campaign. Returns code when available."""
+    if not jwt or not campaign_id:
+        return {"ok": False, "error": "No JWT or campaign_id"}
+    try:
+        http = _session()
+        h = _h(jwt, duid, edadeal_uid)
+        base = f"https://api.edadeal.ru/api/couponhub/api/v1/campaigns/{campaign_id}"
+
+        # GET first (some campaigns respond to GET)
+        r = http.get(base + "/code?showExternal=true", headers=h, timeout=TMO)
+        if r.status_code == 200 and r.text:
+            data = r.json()
+            code = data.get("code") or {}
+            return {
+                "ok": True,
+                "code": code.get("value", ""),
+                "type": code.get("type", ""),
+                "action_url": data.get("actionUrl", ""),
+            }
+
+        # Some campaigns need POST /code
+        r2 = http.post(base + "/code", headers=h, json={}, timeout=TMO)
+        if r2.status_code == 200 and r2.text:
+            data = r2.json()
+            code = data.get("code") or {}
+            return {
+                "ok": True,
+                "code": code.get("value", ""),
+                "type": code.get("type", ""),
+                "action_url": data.get("actionUrl", ""),
+            }
+
+        return {"ok": False, "error": f"HTTP {r.status_code}/{r2.status_code}", "status": r2.status_code}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

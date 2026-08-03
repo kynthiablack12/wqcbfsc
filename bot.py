@@ -81,11 +81,12 @@ def main_menu():
             InlineKeyboardButton("📋 Мои аккаунты", callback_data="list_accounts"),
         ],
         [
+            InlineKeyboardButton("🎟 Промокоды", callback_data="promos"),
             InlineKeyboardButton("📊 Статистика", callback_data="stats"),
-            InlineKeyboardButton("📖 Помощь", callback_data="help"),
         ],
         [
             InlineKeyboardButton("📅 Отметиться", callback_data="daily_checkin"),
+            InlineKeyboardButton("📖 Помощь", callback_data="help"),
         ],
     ])
 
@@ -494,6 +495,127 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ <code>{acc['login']}</code> удалён",
             reply_markup=back_kb(), parse_mode="HTML",
         )
+
+    elif data == "promos":
+        await q.edit_message_text(
+            "🎟 <b>Промокоды</b>\n\n"
+            "Получай промокоды на скидку со своих аккаунтов.\n"
+            "Промокод выдаётся один раз на аккаунт.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛒 Пятёрочка: −500 ₽ от 1000 ₽", callback_data="promo_pyat")],
+                [InlineKeyboardButton("🥕 Купер: −40% от 900 ₽", callback_data="promo_kuper")],
+                [InlineKeyboardButton("◀️ В меню", callback_data="menu")],
+            ]),
+            parse_mode="HTML",
+        )
+
+    elif data in ("promo_pyat", "promo_kuper", "promo_reget"):
+        # dispatch to shared promo flow
+        if data == "promo_pyat" or data == "promo_reget:54dd4d1a-45b1-441d-9d66-ed7830222f24":
+            campaign_id = "54dd4d1a-45b1-441d-9d66-ed7830222f24"
+            title = "Пятёрочка: −500 ₽ от 1000 ₽"
+            offer = "Скидка 500 ₽ на первый заказ от 1000 ₽"
+        else:
+            campaign_id = "cbc09a86-6ee3-4681-b19d-8dec5860e279"
+            title = "Купер: −40% от 900 ₽"
+            offer = "Скидка 40% на первый заказ от 900 ₽"
+
+        if data.startswith("promo_reget:"):
+            for p in db.get_user_promo_codes(uid):
+                db.delete_promo_code(p["account_id"], campaign_id)
+
+        accounts = db.get_user_accounts(uid)
+        active = [a for a in accounts if a["status"] == "active"]
+        if not active:
+            await q.edit_message_text(
+                "❌ Нет активных аккаунтов\n\nСначала добавь аккаунт:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Добавить аккаунт", callback_data="add_account")],
+                    [InlineKeyboardButton("◀️ В меню", callback_data="menu")],
+                ]),
+                parse_mode="HTML",
+            )
+            return
+
+        await q.answer("Получаю промокоды...")
+        msg = await q.edit_message_text(
+            f"🎟 <b>{title}</b>\n\n"
+            f"<i>{offer}</i>\n\n"
+            f"Получаю промокоды с аккаунтов...\n"
+            f"Обработано: 0 / {len(active)}",
+            parse_mode="HTML",
+        )
+
+        async def do_promo(chat_id, mid):
+            got = []     # (login, code)
+            already = [] # (login, code)
+            failed = []  # (login, reason)
+
+            async def process(acc):
+                nonlocal got, already, failed
+                existing = db.get_promo_code(acc["id"], campaign_id)
+                if existing:
+                    already.append((acc["login"], existing["code"]))
+                    return
+                auth = await asyncio.to_thread(edadeal.authenticate, acc["yandex_token"])
+                if not auth["ok"]:
+                    failed.append((acc["login"], "auth"))
+                    return
+                result = await asyncio.to_thread(
+                    edadeal.get_coupon_code, auth["jwt"], auth.get("duid"), auth.get("uid"), campaign_id
+                )
+                if result.get("ok") and result.get("code"):
+                    db.save_promo_code(uid, acc["id"], campaign_id, result["code"])
+                    got.append((acc["login"], result["code"]))
+                else:
+                    failed.append((acc["login"], "недоступно"))
+
+            tasks = [process(acc) for acc in active]
+            done = 0
+            for coro in asyncio.as_completed(tasks):
+                await coro
+                done += 1
+                if done % 5 == 0 or done == len(tasks):
+                    try:
+                        await context.bot.edit_message_text(
+                            f"🎟 <b>{title}</b>\n\n"
+                            f"<i>{offer}</i>\n\n"
+                            f"Обработано: {done} / {len(active)}...",
+                            chat_id=chat_id, message_id=mid, parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+
+            lines = [f"🎟 <b>{title}</b>\n\n<i>{offer}</i>\n"]
+            if got:
+                lines.append(f"✅ <b>Получено новых: {len(got)}</b>")
+                for login, code in got:
+                    lines.append(f"• <code>{login}</code>\n   <code>{code}</code>")
+            if already:
+                lines.append(f"\n♻️ <b>Уже были: {len(already)}</b>")
+                for login, code in already:
+                    lines.append(f"• <code>{login}</code>\n   <code>{code}</code>")
+            if failed:
+                lines.append(f"\n❌ <b>Недоступно: {len(failed)}</b>")
+                for login, reason in failed[:15]:
+                    lines.append(f"• <code>{login}</code> — {reason}")
+                if len(failed) > 15:
+                    lines.append(f"  и ещё {len(failed) - 15}...")
+
+            text = "\n".join(lines)
+            try:
+                await context.bot.edit_message_text(
+                    text, chat_id=chat_id, message_id=mid,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔁 Обновить", callback_data=f"promo_reget:{campaign_id}")],
+                        [InlineKeyboardButton("◀️ В меню", callback_data="menu")],
+                    ]),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+        asyncio.create_task(do_promo(msg.chat_id, msg.message_id))
 
     elif data == "stats":
         s = db.get_user_stats(uid)

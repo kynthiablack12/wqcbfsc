@@ -134,6 +134,16 @@ def init_db():
                 message TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                account_id INTEGER NOT NULL,
+                campaign_id TEXT NOT NULL,
+                code TEXT NOT NULL,
+                created_at TEXT
+            )
+        """)
     else:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
@@ -177,6 +187,14 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_time TEXT,
                 message TEXT
+            );
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                campaign_id TEXT NOT NULL,
+                code TEXT NOT NULL,
+                created_at TEXT
             );
         """)
     conn.commit()
@@ -394,3 +412,50 @@ def get_tracking_log(limit=50):
         "SELECT event_time, message FROM tracking_log ORDER BY id DESC LIMIT ?",
         (limit,),
     ).fetchall()
+
+
+def save_promo_code(user_id, account_id, campaign_id, code):
+    conn = get_conn()
+    now = datetime.now().isoformat()
+    if _is_pg():
+        conn.execute(
+            "INSERT INTO promo_codes (user_id, account_id, campaign_id, code, created_at) VALUES (?,?,?,?,?)",
+            (user_id, account_id, campaign_id, code, now),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO promo_codes (user_id, account_id, campaign_id, code, created_at) VALUES (?,?,?,?,?)",
+            (user_id, account_id, campaign_id, code, now),
+        )
+    conn.commit()
+
+
+def get_user_promo_codes(user_id):
+    conn = get_conn()
+    return conn.execute(
+        "SELECT * FROM promo_codes WHERE user_id=? ORDER BY id DESC",
+        (user_id,),
+    ).fetchall()
+
+
+def get_promo_code(account_id, campaign_id):
+    conn = get_conn()
+    return conn.execute(
+        "SELECT * FROM promo_codes WHERE account_id=? AND campaign_id=?",
+        (account_id, campaign_id),
+    ).fetchone()
+
+
+def delete_promo_code(account_id, campaign_id):
+    conn = get_conn()
+    conn.execute(
+        "DELETE FROM promo_codes WHERE account_id=? AND campaign_id=?",
+        (account_id, campaign_id),
+    )
+    conn.commit()
+
+
+def clear_user_promo_codes(user_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM promo_codes WHERE user_id=?", (user_id,))
+    conn.commit()
