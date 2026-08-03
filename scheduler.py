@@ -172,9 +172,21 @@ async def run_all_triggers():
     return await _run_all_triggers_async()
 
 
+def _cards_summary(cards):
+    if not cards:
+        return "нет позиций"
+    parts = []
+    for c in cards:
+        pts = c.get("points", "?")
+        cnt = c.get("count", 0)
+        parts.append(f"{pts}={cnt}шт")
+    return ", ".join(parts)
+
+
 async def tracking_loop():
-    """Poll the tracking account's diamond balance every minute.
-    When it changes, run the 4 triggers on ALL active accounts and log to the admin dashboard."""
+    """Poll the tracking account's 'Plus points for diamonds' block (19628/11) every minute.
+    Watches for available positions (100/500/1000 'шт'). When they appear or change,
+    run the 4 triggers on ALL active accounts and log to the admin dashboard."""
     logging.info("[tracking] start")
     while True:
         try:
@@ -186,34 +198,40 @@ async def tracking_loop():
             auth = await to_thread(edadeal.authenticate, tracker["yandex_token"], timeout=30)
             if not auth["ok"]:
                 db.update_tracking_status(tracker["id"], "expired")
+                db.add_tracking_log("⚠️ Не удалось авторизоваться. Статус: expired")
+                _dash_log("tracking", "auth_fail", "expired")
                 await asyncio.sleep(TRACKING_INTERVAL)
                 continue
 
-            bal = await to_thread(
-                edadeal.get_diamond_balance,
+            res = await to_thread(
+                edadeal.get_plus_points_counts,
                 auth["jwt"], auth.get("duid"), auth.get("uid"),
                 timeout=30,
             )
-            if not bal["ok"]:
+            if not res["ok"]:
+                db.add_tracking_log(f"⚠️ Ошибка блока: {res.get('error', '?')}")
+                _dash_log("tracking", "block_error", str(res.get('error', '?')))
                 await asyncio.sleep(TRACKING_INTERVAL)
                 continue
 
-            new_balance = bal["balance"]
-            old_balance = tracker["last_balance"]
+            cards = res["cards"]
+            new_total = res["total"]
+            old_total = tracker["last_balance"]
 
-            if old_balance is None:
+            if old_total is None:
                 # First observation — just record it, no trigger yet
-                db.update_tracking_balance(tracker["id"], new_balance)
+                db.update_tracking_balance(tracker["id"], new_total)
                 db.add_tracking_log(
-                    f"🟢 Отслеживание запущено. Текущий баланс: {new_balance} 💎"
+                    f"🟢 Отслеживание запущено. Позиции: {_cards_summary(cards)}"
                 )
-                _dash_log("tracking", "init", f"balance={new_balance}")
-            elif new_balance != old_balance:
-                db.update_tracking_balance(tracker["id"], new_balance)
+                _dash_log("tracking", "init", f"total={new_total}")
+            elif new_total != old_total:
+                db.update_tracking_balance(tracker["id"], new_total)
                 db.add_tracking_log(
-                    f"⚡ Баланс изменился: {old_balance} → {new_balance} 💎. Запускаю триггеры на все аккаунты..."
+                    f"⚡ Позиции изменились: {old_total}шт → {new_total}шт "
+                    f"({_cards_summary(cards)}). Запускаю триггеры на все аккаунты..."
                 )
-                _dash_log("tracking", "balance_change", f"{old_balance}->{new_balance}")
+                _dash_log("tracking", "counts_change", f"{old_total}->{new_total}")
 
                 result = await _run_all_triggers_async()
                 if result.get("ok"):
@@ -227,8 +245,10 @@ async def tracking_loop():
                 _dash_log("tracking", "triggers_done", msg)
                 logging.info("[tracking] %s", msg)
             else:
-                # Balance unchanged — nothing to do
-                db.update_tracking_balance(tracker["id"], new_balance)
+                # Positions unchanged — just refresh last_checked and log the poll
+                db.update_tracking_balance(tracker["id"], new_total)
+                db.add_tracking_log(f"🔄 Проверка: {_cards_summary(cards)}")
+                _dash_log("tracking", "poll", _cards_summary(cards))
 
         except Exception as e:
             logging.exception("[tracking] error: %s", e)
